@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: #ffffff; color: #172033; }
+    body { font-family: Arial, "Segoe UI", sans-serif; }
+    .sheet { width: 1100px; padding: 46px; background: #fff; }
+    .banner { padding: 24px 28px; border-radius: 22px; background: linear-gradient(135deg, #8f1432, #c81d4f); color: white; }
+    .banner h1 { margin: 0 0 7px; font-size: 32px; }
+    .banner p { margin: 0; opacity: .92; font-size: 17px; }
+    .student { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; margin-top: 18px; }
+    .info { padding: 15px 16px; border: 1px solid #e4e7ec; border-radius: 14px; background: #fafafa; }
+    .info small { display: block; color: #667085; font-weight: 800; margin-bottom: 4px; }
+    .task { margin-top: 20px; padding: 20px; border: 1px solid #f3c9d5; border-radius: 18px; background: #fff7f9; }
+    .task h2 { margin: 0 0 10px; font-size: 29px; line-height: 1.25; }
+    .content { margin-top: 16px; padding: 18px 20px 18px 24px; border-left: 7px solid #9d1635; border-radius: 14px; background: #fff8dc; font-size: 24px; font-weight: 750; line-height: 1.55; white-space: pre-wrap; }
+    .illustrations { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; margin-top: 16px; align-items: start; justify-items: center; }
+    .illustrations.single { grid-template-columns: 1fr; max-width: 600px; margin-left: auto; margin-right: auto; }
+    .visual { width: 100%; min-height: 170px; border: 1px solid #eadfe3; border-radius: 12px; background: #fff; padding: 10px; display: flex; flex-direction: column; align-items: center; justify-content: center; overflow: hidden; }
+    .visual img { display: block; width: auto; max-width: 100%; height: auto; max-height: 520px; object-fit: contain; margin: 0 auto; }
+    .visual figcaption { margin-top: 8px; color: #667085; font-size: 12px; text-align: center; }
+    .answers-wrap { margin-top: 22px; }
+    .answers-wrap > h2 { margin: 0 0 12px; font-size: 22px; }
+    .answers { display: grid; gap: 14px; align-items: start; }
+    .answers.layout-vertical { grid-template-columns: 1fr; }
+    .answers.layout-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .answers.layout-split { grid-template-columns: repeat(2, minmax(0,1fr)); }
+    .answers.layout-single-page { display: block; padding: 18px; border: 1px solid #e4e7ec; border-radius: 18px; background: #fff; }
+    .answer { min-width: 0; padding: 16px; border: 1.5px solid #d0d5dd; border-radius: 16px; background: white; line-height: 1.6; font-size: 17px; overflow-wrap: anywhere; break-inside: avoid; }
+    .answers.layout-split .answer { min-height: 310px; }
+    .answers.layout-single-page .answer { padding: 0 0 22px; margin: 0 0 22px; border: 0; border-bottom: 1px dashed #d7dce3; border-radius: 0; min-height: 0; }
+    .answers.layout-single-page .answer:last-child { margin-bottom: 0; padding-bottom: 0; border-bottom: 0; }
+    .answer-label { display: block; color: #344054; font-size: 14px; font-weight: 850; margin-bottom: 7px; }
+    .answer-text { white-space: pre-wrap; }
+    .answer-images { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; margin-top: 12px; align-items: start; justify-items: center; }
+    .answer-images.single { grid-template-columns: 1fr; max-width: 520px; margin-left: auto; margin-right: auto; }
+    .answer-image { width: 100%; min-height: 150px; border: 1px solid #e4e7ec; border-radius: 10px; background: #fff; padding: 10px; display: flex; align-items: center; justify-content: center; overflow: hidden; }
+    .answer-image img { display: block; width: auto; max-width: 100%; height: auto; max-height: 620px; object-fit: contain; margin: 0 auto; }
+  </style>
+</head>
+<body>
+  <main class="sheet">
+    <section class="banner">
+      <h1>Phiếu trả lời</h1>
+      <p>Bài làm của học sinh</p>
+    </section>
+
+    <section class="student">
+      <div class="info"><small>HỌ VÀ TÊN</small><%= report.studentName %></div>
+      <div class="info"><small>LỚP</small><%= report.studentClass %></div>
+    </section>
+
+    <section class="task">
+      <h2><%= report.title %></h2>
+      <% if (report.content) { %><div class="content"><%= report.content %></div><% } %>
+      <% if (report.illustrations && report.illustrations.length) { %>
+        <div class="illustrations <%= report.illustrations.length === 1 ? 'single' : '' %>">
+          <% report.illustrations.forEach(function(item) { %>
+            <figure class="visual">
+              <img src="<%= item.dataUrl %>" alt="<%= item.alt || 'Hình minh họa' %>" />
+              <% if (item.caption) { %><figcaption><%= item.caption %></figcaption><% } %>
+            </figure>
+          <% }); %>
+        </div>
+      <% } %>
+    </section>
+
+    <section class="answers-wrap">
+      <h2>Bài làm</h2>
+      <div class="answers layout-<%= report.layout %>">
+        <% if (!report.answers || !report.answers.length) { %>
+          <div class="answer"><span class="answer-label">Bài làm</span><div class="answer-text">(Chưa có ô trả lời)</div></div>
+        <% } %>
+        <% (report.answers || []).forEach(function(answer) { %>
+          <article class="answer">
+            <span class="answer-label"><%= answer.label %></span>
+            <% if (answer.text) { %><div class="answer-text"><%= answer.text %></div><% } else if (!answer.images || !answer.images.length) { %><div class="answer-text">(Chưa có nội dung)</div><% } %>
+            <% if (answer.images && answer.images.length) { %>
+              <div class="answer-images <%= answer.images.length === 1 ? 'single' : '' %>">
+                <% answer.images.forEach(function(dataUrl) { %>
+                  <div class="answer-image"><img src="<%= dataUrl %>" alt="Hình ảnh trong câu trả lời" /></div>
+                <% }); %>
+              </div>
+            <% } %>
+          </article>
+        <% }); %>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

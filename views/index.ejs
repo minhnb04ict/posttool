@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title><%= pageTitle %></title>
+  <meta name="theme-color" content="#9d1635" />
+  <link rel="stylesheet" href="/css/app.css?v=<%= appVersion %>" />
+</head>
+<body>
+<main class="app-shell">
+    <section class="hero">
+      <h1>Phiếu trả lời</h1>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <h2 class="card-title"><span class="step">1</span> Thông tin học sinh</h2>
+        <div class="student-grid">
+          <div class="field">
+            <label for="studentName">Họ và tên</label>
+            <input id="studentName" autocomplete="name" placeholder="Ví dụ: Nguyễn Minh Anh" />
+          </div>
+          <div class="field">
+            <label for="studentClass">Lớp</label>
+            <input id="studentClass" placeholder="Ví dụ: 4A10" />
+          </div>
+        </div>
+        <span id="saveStatus" hidden></span>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title"><span class="step">2</span> Nhiệm vụ</h2>
+        <div class="field" id="questionPickerWrap" style="display:none; margin-bottom:15px; max-width:460px;">
+          <label for="questionPicker">Chọn bài</label>
+          <select id="questionPicker"></select>
+        </div>
+        <div id="questionArea"><div class="empty">Đang tải nhiệm vụ từ API…</div></div>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title"><span class="step">3</span> Bài làm</h2>
+        <div id="answers" class="answers"></div>
+        <div class="toolbar">
+          <button class="btn btn-blue" id="addAnswerBtn">＋ Thêm ô trả lời</button>
+          <button class="btn btn-success" id="exportBtn">📤 Nộp bài</button>
+          <span class="status" id="autoSaveStatus" hidden></span>
+        </div>
+      </section>
+    </div>
+
+  </main>
+
+  <script>
+    window.POSTTOOL_CONFIG = <%- JSON.stringify(clientConfig) %>;
+  </script>
+  <script src="/vendor/pdfjs/pdf.min.js"></script>
+  <script src="/js/app.js?v=<%= appVersion %>"></script>
+</body>
+</html>

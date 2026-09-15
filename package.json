@@ -1,0 +1,27 @@
+{
+  "name": "posttool",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Phiếu trả lời học sinh - Express + EJS + server-side PNG report rendering",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "compression": "^1.8.1",
+    "content-disposition": "^0.5.4",
+    "dotenv": "^16.6.1",
+    "ejs": "^3.1.10",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "morgan": "^1.10.0",
+    "multer": "^2.0.2",
+    "pdfjs-dist": "3.11.174",
+    "puppeteer-core": "^24.16.0",
+    "sharp": "^0.34.3"
+  }
+}
