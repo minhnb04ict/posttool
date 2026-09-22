@@ -1,5 +1,5 @@
 /**
- * GOOGLE APPS SCRIPT - PHIEU TRA LOI V8.8
+ * GOOGLE APPS SCRIPT - POSTTOOL 1.3.3
  *
  * Chuc nang:
  * 1) GET /exec -> tra du lieu Google Sheet dang JSON. Ho tro ca 2 kieu:
@@ -7,7 +7,8 @@
  *    - Bang ngang: dong 1 = header, cac dong sau = du lieu.
  * 2) POST action=resolveIllustrations -> doc anh List Image bang quyen cua script
  *    va tra data:image/...;base64 de web co the dua anh vao bao cao PNG, tranh loi CORS.
- * 3) POST action=uploadReport -> luu PNG vao Folder trong Sheet va tu danh so lan nop.
+ * 3) POST action=uploadReport -> luu PNG vao Folder, co submissionId chong nop trung.
+ * 4) POST action=findSubmission -> kiem tra lan nop da duoc tao hay chua sau timeout/mat response.
  *
  * Neu script nay duoc tao truc tiep tu Google Sheet (Extensions > Apps Script),
  * co the de SPREADSHEET_ID = "".
@@ -20,16 +21,19 @@ const CONFIG = {
   MAX_ILLUSTRATIONS: 12,     // Gioi han anh minh hoa tra ve moi lan.
   MAX_IMAGE_BYTES: 8 * 1024 * 1024,
   MAX_REPORT_BYTES: 25 * 1024 * 1024,
-  MAX_PDF_BYTES: 18 * 1024 * 1024
+  MAX_PDF_BYTES: 3 * 1024 * 1024,
+  TASK_CACHE_SECONDS: 2
 };
 
 function doGet(e) {
   try {
-    const action = String((e && e.parameter && e.parameter.action) || "").trim();
+    const params = (e && e.parameter) ? e.parameter : {};
+    const action = String(params.action || "").trim();
     if (action === "health") {
-      return jsonOutput_({ ok: true, service: "student-report-v8" });
+      return jsonOutput_({ ok: true, service: "student-report-v8", version: "1.3.3" });
     }
-    return jsonOutput_(getApiResponse_());
+    const forceRefresh = String(params.fresh || "") === "1";
+    return jsonOutput_(getApiResponse_(forceRefresh));
   } catch (error) {
     return jsonOutput_({ ok: false, error: errorMessage_(error) });
   }
@@ -54,6 +58,10 @@ function doPost(e) {
 
     if (action === "uploadReport") {
       return jsonOutput_(uploadReport_(payload));
+    }
+
+    if (action === "findSubmission") {
+      return jsonOutput_(findSubmission_(payload));
     }
 
     return jsonOutput_({ ok: false, error: "Action khong hop le." });
@@ -86,7 +94,17 @@ function getDataSheet_() {
   return sheets[0];
 }
 
-function getApiResponse_() {
+function getApiResponse_(forceRefresh) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = "posttool_task_payload_v133";
+
+  if (!forceRefresh) {
+    try {
+      const cached = cache.get(cacheKey);
+      if (cached) return JSON.parse(cached);
+    } catch (_) {}
+  }
+
   const sheet = getDataSheet_();
   const values = sheet.getDataRange().getDisplayValues();
   if (!values.length) return {};
@@ -94,7 +112,15 @@ function getApiResponse_() {
   const rows = parseSheetRows_(values);
   // Giu dung format API hien tai cua thay: bang doc A:B -> tra ve 1 object JSON.
   // Neu sau nay dung bang ngang (header o dong 1) -> tra ve mang cac object.
-  return looksLikeVerticalKeyValue_(values) ? (rows[0] || {}) : rows;
+  const response = looksLikeVerticalKeyValue_(values) ? (rows[0] || {}) : rows;
+
+  // Cache rat ngan de khi 32 may mo cung luc, Apps Script khong phai doc
+  // Google Sheet lap lai hang chuc lan. Neu Sheet vua duoc sua, toi da chi tre
+  // vai giay; nut "Tai lai du lieu" tren web se gui fresh=1 de bo qua cache.
+  try {
+    cache.put(cacheKey, JSON.stringify(response), Math.max(1, CONFIG.TASK_CACHE_SECONDS || 2));
+  } catch (_) {}
+  return response;
 }
 
 function getSheetRows_() {
@@ -335,7 +361,8 @@ function resolveListItems_(payload) {
           type: type,
           fileId: fileId,
           name: file.getName(),
-          mimeType: mimeType
+          mimeType: mimeType,
+          size: file.getSize()
         };
       } catch (error) {
         return { sourceUrl: url, type: "file", fileId: fileId, error: errorMessage_(error) };
@@ -495,6 +522,125 @@ function blobToImageItem_(blob, sourceUrl, name) {
   };
 }
 
+function normalizeSubmissionId_(value) {
+  return String(value || "")
+    .trim()
+    .replace(/[^a-zA-Z0-9._:-]+/g, "")
+    .substring(0, 160);
+}
+
+function digestHex_(value) {
+  const bytes = Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    String(value || ""),
+    Utilities.Charset.UTF_8
+  );
+  return bytes.map(function(byte) {
+    const n = byte < 0 ? byte + 256 : byte;
+    return ("0" + n.toString(16)).slice(-2);
+  }).join("");
+}
+
+function submissionCacheKey_(folderId, submissionId) {
+  return "posttool_sub_" + digestHex_(folderId + "|" + submissionId).substring(0, 40);
+}
+
+function submissionPropertyKey_(folderId, submissionId) {
+  return "posttool_subp_" + digestHex_(folderId + "|" + submissionId).substring(0, 40);
+}
+
+function counterPropertyKey_(folderId, baseName) {
+  return "posttool_ctr_" + digestHex_(folderId + "|" + baseName).substring(0, 40);
+}
+
+function fileResult_(file, baseName, extra) {
+  const name = String(file.getName() || "");
+  const escaped = escapeRegExp_(baseName || "");
+  const match = name.match(new RegExp("^" + escaped + "_(\\d+)\\.png$", "i"));
+  const result = {
+    ok: true,
+    found: true,
+    attempt: match ? parseInt(match[1], 10) : 0,
+    fileName: name,
+    fileId: file.getId(),
+    fileUrl: file.getUrl()
+  };
+  if (extra) {
+    Object.keys(extra).forEach(function(key) { result[key] = extra[key]; });
+  }
+  return result;
+}
+
+function getRememberedSubmission_(folderId, submissionId, baseName) {
+  if (!submissionId) return null;
+  const cacheKey = submissionCacheKey_(folderId, submissionId);
+  const propertyKey = submissionPropertyKey_(folderId, submissionId);
+  const cache = CacheService.getScriptCache();
+  const props = PropertiesService.getScriptProperties();
+  const candidates = [cache.get(cacheKey), props.getProperty(propertyKey)];
+
+  for (let i = 0; i < candidates.length; i++) {
+    const raw = candidates[i];
+    if (!raw) continue;
+    try {
+      const saved = JSON.parse(raw);
+      if (!saved.fileId) continue;
+      const file = DriveApp.getFileById(saved.fileId);
+      return fileResult_(file, baseName, { reused: true });
+    } catch (_) {}
+  }
+  return null;
+}
+
+function rememberSubmission_(folderId, submissionId, result) {
+  if (!submissionId || !result || !result.fileId) return;
+  const value = JSON.stringify({
+    fileId: result.fileId,
+    fileName: result.fileName,
+    attempt: result.attempt || 0
+  });
+  try {
+    CacheService.getScriptCache().put(submissionCacheKey_(folderId, submissionId), value, 21600);
+  } catch (_) {}
+  try {
+    PropertiesService.getScriptProperties().setProperty(submissionPropertyKey_(folderId, submissionId), value);
+  } catch (_) {}
+}
+
+function findSubmission_(payload) {
+  const folderUrl = String(payload.folderUrl || "").trim();
+  const folderId = extractDriveFolderId_(folderUrl);
+  if (!folderId) throw new Error("Truong Folder khong phai link Google Drive folder hop le.");
+
+  const allowedFolderIds = getAllowedFolderIds_();
+  if (!allowedFolderIds[folderId]) {
+    throw new Error("Folder nay khong duoc khai bao trong cot Folder cua Google Sheet.");
+  }
+
+  const baseName = sanitizeBaseName_(payload.baseName || "");
+  const submissionId = normalizeSubmissionId_(payload.submissionId || "");
+  if (!baseName || !submissionId) return { ok: true, found: false };
+
+  const remembered = getRememberedSubmission_(folderId, submissionId, baseName);
+  if (remembered) return remembered;
+
+  // Duong du phong hiem khi cache/property bi mat: tim marker trong description.
+  const marker = "posttool-submission:" + submissionId;
+  const folder = DriveApp.getFolderById(folderId);
+  const files = folder.getFiles();
+  while (files.hasNext()) {
+    const file = files.next();
+    try {
+      if (String(file.getDescription() || "") === marker) {
+        const result = fileResult_(file, baseName, { reused: true });
+        rememberSubmission_(folderId, submissionId, result);
+        return result;
+      }
+    } catch (_) {}
+  }
+  return { ok: true, found: false };
+}
+
 function uploadReport_(payload) {
   const folderUrl = String(payload.folderUrl || "").trim();
   const folderId = extractDriveFolderId_(folderUrl);
@@ -507,6 +653,11 @@ function uploadReport_(payload) {
 
   const baseName = sanitizeBaseName_(payload.baseName || "");
   if (!baseName) throw new Error("Thieu ten file bao cao.");
+  const submissionId = normalizeSubmissionId_(payload.submissionId || "");
+
+  // Neu request bi retry/timeout, tra lai dung file da tao thay vi tao file moi.
+  const remembered = getRememberedSubmission_(folderId, submissionId, baseName);
+  if (remembered) return remembered;
 
   const imageData = String(payload.imageData || "");
   const match = imageData.match(/^data:image\/png;base64,(.+)$/);
@@ -517,37 +668,32 @@ function uploadReport_(payload) {
     throw new Error("Bao cao PNG qua lon. Gioi han hien tai: " + Math.round(CONFIG.MAX_REPORT_BYTES / 1024 / 1024) + " MB.");
   }
 
-  // Khoa script de 2 hoc sinh nop cung luc khong bi trung so lan nop.
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
 
   try {
-    const folder = DriveApp.getFolderById(folderId);
-    const escaped = escapeRegExp_(baseName);
-    const regex = new RegExp("^" + escaped + "_(\\d+)\\.png$", "i");
-    let maxAttempt = 0;
+    const rememberedInsideLock = getRememberedSubmission_(folderId, submissionId, baseName);
+    if (rememberedInsideLock) return rememberedInsideLock;
 
-    const files = folder.getFiles();
-    while (files.hasNext()) {
-      const file = files.next();
-      const name = String(file.getName() || "");
-      const fileMatch = name.match(regex);
-      if (!fileMatch) continue;
-      const number = parseInt(fileMatch[1], 10);
-      if (isFinite(number)) maxAttempt = Math.max(maxAttempt, number);
+    const folder = DriveApp.getFolderById(folderId);
+    // Khong scan toan bo folder. Bat dau tu so lan nop ma client goi y va chi
+    // kiem tra cac ten file cua dung hoc sinh/bai nay. Nhanh hon nhieu khi folder lon.
+    let attempt = Math.max(1, parseInt(payload.preferredAttempt || "1", 10) || 1);
+    let fileName = baseName + "_" + attempt + ".png";
+    while (folder.getFilesByName(fileName).hasNext()) {
+      attempt += 1;
+      fileName = baseName + "_" + attempt + ".png";
     }
 
-    const attempt = maxAttempt + 1;
-    const fileName = baseName + "_" + attempt + ".png";
     const blob = Utilities.newBlob(bytes, "image/png", fileName);
     const file = folder.createFile(blob);
+    if (submissionId) {
+      try { file.setDescription("posttool-submission:" + submissionId); } catch (_) {}
+    }
 
-    return {
-      ok: true,
-      attempt: attempt,
-      fileName: fileName,
-      fileId: file.getId()
-    };
+    const result = fileResult_(file, baseName, { reused: false });
+    rememberSubmission_(folderId, submissionId, result);
+    return result;
   } finally {
     lock.releaseLock();
   }

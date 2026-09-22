@@ -4,15 +4,166 @@
     if (window.pdfjsLib) {
       pdfjsLib.GlobalWorkerOptions.workerSrc = window.POSTTOOL_CONFIG?.pdfWorkerUrl || "/vendor/pdfjs/pdf.worker.min.js";
     }
-    const PDF_MAX_BYTES = 18 * 1024 * 1024;
+    const PDF_MAX_BYTES = 3 * 1024 * 1024;
     const mediaTypeCache = new Map();
+
+    const axiosClient = window.axios ? window.axios.create({
+      timeout: 15000,
+      headers: { Accept: "application/json, text/plain, */*" }
+    }) : null;
+
+    function sleepClient(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function axiosStatus(error) {
+      return Number(error?.response?.status || 0);
+    }
+
+    function axiosRetryable(error) {
+      const status = axiosStatus(error);
+      return !status || status === 408 || status === 425 || status === 429 || status >= 500
+        || error?.code === "ECONNABORTED" || error?.code === "ERR_NETWORK" || error?.code === "ETIMEDOUT";
+    }
+
+    function axiosErrorMessage(error) {
+      const status = axiosStatus(error);
+      const data = error?.response?.data;
+      const detail = data && typeof data === "object" ? (data.error || data.detail) : "";
+      if (detail) return String(detail);
+      if (status) return `HTTP ${status}`;
+      return String(error?.message || "Không kết nối được máy chủ.");
+    }
+
+    async function axiosRequestWithRetry(config, { retries = 2, baseDelay = 320 } = {}) {
+      if (!axiosClient) throw new Error("Thư viện Axios chưa tải được.");
+      let lastError = null;
+      for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+          return await axiosClient.request(config);
+        } catch (error) {
+          lastError = error;
+          if (!axiosRetryable(error) || attempt >= retries) throw error;
+          const jitter = Math.floor(Math.random() * 260);
+          await sleepClient(Math.min(2200, baseDelay * (2 ** attempt)) + jitter);
+        }
+      }
+      throw lastError || new Error("Không gửi được yêu cầu.");
+    }
 
 
     // Luôn tải API mới khi reload. Nếu API không đổi thì khôi phục tiến trình;
     // nếu API thay đổi thì reset bài làm và chỉ giữ Họ tên + Lớp.
     const LAST_ID_KEY = "student_reflection_last_identity_v5";
     const API_SIGNATURE_KEY = "student_reflection_api_signature_v1";
+    const API_DATA_KEY = "student_reflection_api_data_v1";
     const PROGRESS_PREFIX = "student_reflection_progress_v6__";
+
+    const PROGRESS_DB_NAME = "posttool_progress_db";
+    const PROGRESS_DB_VERSION = 1;
+    const PROGRESS_STORE = "progress";
+    let progressDbPromise = null;
+
+    function safeLocalGet(key) {
+      try { return localStorage.getItem(key); } catch (_) { return null; }
+    }
+
+    function safeLocalSet(key, value) {
+      try { localStorage.setItem(key, value); return true; } catch (_) { return false; }
+    }
+
+    function safeLocalRemove(key) {
+      try { localStorage.removeItem(key); } catch (_) {}
+    }
+
+    function openProgressDb() {
+      if (!window.indexedDB) return Promise.resolve(null);
+      if (!progressDbPromise) {
+        progressDbPromise = new Promise(resolve => {
+          try {
+            const req = indexedDB.open(PROGRESS_DB_NAME, PROGRESS_DB_VERSION);
+            req.onupgradeneeded = () => {
+              const db = req.result;
+              if (!db.objectStoreNames.contains(PROGRESS_STORE)) db.createObjectStore(PROGRESS_STORE);
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => resolve(null);
+            req.onblocked = () => resolve(null);
+          } catch (_) { resolve(null); }
+        });
+      }
+      return progressDbPromise;
+    }
+
+    async function idbPutProgress(key, value) {
+      const db = await openProgressDb();
+      if (!db) return false;
+      return new Promise(resolve => {
+        try {
+          const tx = db.transaction(PROGRESS_STORE, "readwrite");
+          tx.objectStore(PROGRESS_STORE).put(value, key);
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+          tx.onabort = () => resolve(false);
+        } catch (_) { resolve(false); }
+      });
+    }
+
+    async function idbGetProgress(key) {
+      const db = await openProgressDb();
+      if (!db) return null;
+      return new Promise(resolve => {
+        try {
+          const tx = db.transaction(PROGRESS_STORE, "readonly");
+          const req = tx.objectStore(PROGRESS_STORE).get(key);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => resolve(null);
+        } catch (_) { resolve(null); }
+      });
+    }
+
+    async function idbClearProgress() {
+      const db = await openProgressDb();
+      if (!db) return;
+      await new Promise(resolve => {
+        try {
+          const tx = db.transaction(PROGRESS_STORE, "readwrite");
+          tx.objectStore(PROGRESS_STORE).clear();
+          tx.oncomplete = resolve;
+          tx.onerror = resolve;
+          tx.onabort = resolve;
+        } catch (_) { resolve(); }
+      });
+    }
+
+
+    async function getStoredApiSignature() {
+      const local = safeLocalGet(API_SIGNATURE_KEY);
+      if (local) return local;
+      const stored = await idbGetProgress("__api_signature__");
+      return typeof stored === "string" ? stored : "";
+    }
+
+    async function setStoredApiSignature(signature) {
+      safeLocalSet(API_SIGNATURE_KEY, signature);
+      await idbPutProgress("__api_signature__", signature);
+    }
+
+
+    async function getStoredApiData() {
+      const local = safeJSON(safeLocalGet(API_DATA_KEY));
+      if (Array.isArray(local) && local.length) return local;
+      const stored = await idbGetProgress("__api_data__");
+      return Array.isArray(stored) ? stored : [];
+    }
+
+    async function setStoredApiData(questionList) {
+      const clean = Array.isArray(questionList) ? questionList : [];
+      const json = JSON.stringify(clean);
+      if (json.length <= 1_500_000) safeLocalSet(API_DATA_KEY, json);
+      else safeLocalRemove(API_DATA_KEY);
+      await idbPutProgress("__api_data__", clean);
+    }
 
     const els = {
       studentName: document.getElementById("studentName"),
@@ -33,14 +184,59 @@
     let identitySaveTimer = null;
     let autoSaveTimer = null;
     let currentApiSignature = "";
+    let submissionInFlight = false;
+    const illustrationResolveCache = new Map();
 
     function normalize(s) {
       return String(s ?? "").trim().replace(/\s+/g, " ");
     }
 
+
+    function appendTextWithLinks(container, value) {
+      const text = String(value ?? "");
+      const urlRegex = /https?:\/\/[^\s<>"']+/gi;
+      let lastIndex = 0;
+      let match;
+
+      while ((match = urlRegex.exec(text)) !== null) {
+        if (match.index > lastIndex) {
+          container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+        }
+
+        let rawUrl = match[0];
+        let trailing = "";
+        while (/[.,;:!?)]$/.test(rawUrl)) {
+          trailing = rawUrl.slice(-1) + trailing;
+          rawUrl = rawUrl.slice(0, -1);
+        }
+
+        const link = document.createElement("a");
+        link.href = rawUrl;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.className = "detected-link";
+        link.textContent = rawUrl;
+        container.appendChild(link);
+        if (trailing) container.appendChild(document.createTextNode(trailing));
+
+        lastIndex = match.index + match[0].length;
+      }
+
+      if (lastIndex < text.length) {
+        container.appendChild(document.createTextNode(text.slice(lastIndex)));
+      }
+    }
+
     function safeNumber(value, fallback = 0) {
       const n = Number.parseInt(String(value ?? "").trim(), 10);
       return Number.isFinite(n) ? n : fallback;
+    }
+
+    function createSubmissionId() {
+      try {
+        if (window.crypto?.randomUUID) return window.crypto.randomUUID();
+      } catch (_) {}
+      return `sub_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
     }
 
     function identityKey() {
@@ -59,7 +255,7 @@
       const studentName = normalize(els.studentName.value);
       const studentClass = normalize(els.studentClass.value);
       try {
-        localStorage.setItem(LAST_ID_KEY, JSON.stringify({ studentName, studentClass }));
+        safeLocalSet(LAST_ID_KEY, JSON.stringify({ studentName, studentClass }));
       } catch (error) {
         console.warn("Không thể lưu Họ tên + Lớp trên trình duyệt:", error);
       }
@@ -71,27 +267,30 @@
     }
 
     function restoreIdentity() {
-      const last = safeJSON(localStorage.getItem(LAST_ID_KEY))
-        || safeJSON(localStorage.getItem("student_reflection_last_identity_v4"))
-        || safeJSON(localStorage.getItem("student_reflection_last_identity_v3"));
+      const last = safeJSON(safeLocalGet(LAST_ID_KEY))
+        || safeJSON(safeLocalGet("student_reflection_last_identity_v4"))
+        || safeJSON(safeLocalGet("student_reflection_last_identity_v3"));
       if (!last) return;
       els.studentName.value = String(last.studentName || "");
       els.studentClass.value = String(last.studentClass || "");
       saveIdentity();
     }
 
-    function clearStoredProgress() {
+    async function clearStoredProgress() {
       const keysToRemove = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const key = localStorage.key(i) || "";
-        if (key.startsWith(PROGRESS_PREFIX)
-            || key.startsWith("student_reflection_progress_v3__")
-            || key.startsWith("student_reflection_progress_v4__")
-            || key.startsWith("student_reflection_progress_v5__")) {
-          keysToRemove.push(key);
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i) || "";
+          if (key.startsWith(PROGRESS_PREFIX)
+              || key.startsWith("student_reflection_progress_v3__")
+              || key.startsWith("student_reflection_progress_v4__")
+              || key.startsWith("student_reflection_progress_v5__")) {
+            keysToRemove.push(key);
+          }
         }
-      }
-      keysToRemove.forEach(key => localStorage.removeItem(key));
+      } catch (_) {}
+      keysToRemove.forEach(safeLocalRemove);
+      await idbClearProgress();
     }
 
     function stableStringify(value) {
@@ -124,28 +323,33 @@
       const key = progressKey();
       if (!key || !currentApiSignature || !questions.length) return false;
       const data = serializeProgress();
-      try {
-        localStorage.setItem(key, JSON.stringify(data));
-        saveIdentity();
-        return true;
-      } catch (error) {
-        console.warn("Không thể tự lưu tiến trình:", error);
-        if (!silent) alert("Không thể lưu tiến trình trên trình duyệt này. Có thể dữ liệu ảnh đã vượt dung lượng lưu trữ.");
-        return false;
+      const json = JSON.stringify(data);
+      // IndexedDB handles pasted images much more reliably than localStorage.
+      void idbPutProgress(key, data);
+      if (json.length <= 1_800_000) safeLocalSet(key, json);
+      else safeLocalRemove(key);
+      saveIdentity();
+      if (!silent && !window.indexedDB && json.length > 1_800_000) {
+        alert("Trình duyệt này có dung lượng lưu tiến trình hạn chế. Hãy nộp bài trước khi đóng trang.");
       }
+      return true;
     }
 
     function scheduleAutoSave() {
       clearTimeout(autoSaveTimer);
+      primeCurrentIllustrations();
       autoSaveTimer = setTimeout(() => saveProgress({ silent: true }), 2500);
     }
 
-    function restoreProgressIfCompatible() {
+    async function restoreProgressIfCompatible() {
       const key = progressKey();
       if (!key) return false;
-      const data = safeJSON(localStorage.getItem(key));
-      if (!data || data.apiSignature !== currentApiSignature) return false;
-
+      const fromLocal = safeJSON(safeLocalGet(key));
+      const fromDb = await idbGetProgress(key);
+      const candidates = [fromDb, fromLocal].filter(data => data && data.apiSignature === currentApiSignature);
+      if (!candidates.length) return false;
+      candidates.sort((a, b) => String(b.savedAt || "").localeCompare(String(a.savedAt || "")));
+      const data = candidates[0];
       answerState = data.answerState && typeof data.answerState === "object" ? data.answerState : {};
       currentIndex = Math.min(Math.max(0, Number(data.currentIndex || 0)), Math.max(0, questions.length - 1));
       return true;
@@ -434,74 +638,130 @@
       return nextOneBased ? nextOneBased - 1 : null;
     }
 
-    async function loadQuestions() {
+    function normalizeApiPayload(data) {
+      if (typeof data === "string") {
+        try { data = JSON.parse(data); }
+        catch (_) {
+          const preview = data.replace(/\s+/g, " ").trim().slice(0, 160);
+          throw new Error("API không trả JSON hợp lệ" + (preview ? ": " + preview : "."));
+        }
+      }
+      if (data && data.ok === false) throw new Error(data.error || "API báo lỗi.");
+      const rawList = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.data)
+          ? data.data
+          : Array.isArray(data?.items)
+            ? data.items
+            : [data];
+      return rawList.filter(x => x && typeof x === "object" && !Array.isArray(x));
+    }
+
+    function showApiNotice(message, { retry = true } = {}) {
+      const notice = document.createElement("div");
+      notice.className = "api-notice";
+      const text = document.createElement("span");
+      text.textContent = message;
+      notice.appendChild(text);
+      if (retry) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "api-retry-btn";
+        button.textContent = "Tải lại dữ liệu";
+        button.addEventListener("click", () => loadQuestions({ force: true }));
+        notice.appendChild(button);
+      }
+      els.questionArea.prepend(notice);
+    }
+
+    async function applyFreshQuestions(freshQuestions) {
+      if (!freshQuestions.length) throw new Error("API không có dữ liệu phù hợp.");
+
+      const newSignature = apiSignatureFor(freshQuestions);
+      const previousSignature = await getStoredApiSignature();
+      const apiChanged = !previousSignature || previousSignature !== newSignature;
+
+      questions = freshQuestions;
+      currentApiSignature = newSignature;
+
+      if (apiChanged) {
+        // API mới hoặc có thay đổi: xóa toàn bộ bài cũ nhưng tuyệt đối không xóa Họ tên + Lớp.
+        await clearStoredProgress();
+        answerState = {};
+        currentIndex = 0;
+        await setStoredApiSignature(newSignature);
+      } else {
+        // API hoàn toàn giống lần trước: khôi phục tiến trình của đúng Họ tên + Lớp.
+        answerState = {};
+        currentIndex = 0;
+        await restoreProgressIfCompatible();
+      }
+
+      await setStoredApiData(freshQuestions);
+      renderQuestionPicker();
+      renderQuestion();
+      renderAnswers();
+    }
+
+    async function loadQuestions({ force = false } = {}) {
       els.questionArea.innerHTML = '<div class="empty">Đang tải nhiệm vụ từ API…</div>';
 
       try {
-        // GIỮ REQUEST Ở DẠNG "SIMPLE GET" ĐỂ TƯƠNG THÍCH GOOGLE APPS SCRIPT.
-        // Không thêm Cache-Control/custom header vì sẽ có thể kích hoạt CORS preflight
-        // và dẫn tới lỗi "Failed to fetch". Tham số _ts đảm nhiệm việc chống cache.
-        const requestUrl = API_URL + (API_URL.includes("?") ? "&" : "?") + "_ts=" + Date.now();
-        const response = await fetch(requestUrl, {
+        const response = await axiosRequestWithRetry({
+          url: API_URL,
           method: "GET",
-          redirect: "follow"
-        });
-        if (!response.ok) throw new Error("HTTP " + response.status);
+          params: force ? { fresh: 1 } : undefined,
+          timeout: force ? 18000 : 14000
+        }, { retries: force ? 2 : 3, baseDelay: 350 });
 
-        // Đọc text trước để báo lỗi rõ hơn nếu deployment trả HTML/login page
-        // thay vì JSON hợp lệ.
-        const rawText = await response.text();
-        let data;
-        try {
-          data = JSON.parse(rawText);
-        } catch (_) {
-          const preview = rawText.replace(/\s+/g, " ").trim().slice(0, 160);
-          throw new Error("API không trả JSON hợp lệ" + (preview ? ": " + preview : "."));
+        const freshQuestions = normalizeApiPayload(response.data);
+        await applyFreshQuestions(freshQuestions);
+
+        const cacheHeader = String(response.headers?.["x-posttool-task-cache"] || "");
+        const staleHeader = String(response.headers?.["x-posttool-task-stale"] || "");
+        if (staleHeader === "1" || cacheHeader === "STALE") {
+          showApiNotice("Kết nối Google Sheets đang chậm. Phiếu đang dùng bản dữ liệu máy chủ gần nhất và sẽ tự thử lại khi tải lại trang.");
         }
-        if (data && data.ok === false) throw new Error(data.error || "API báo lỗi.");
-
-        const rawList = Array.isArray(data)
-          ? data
-          : Array.isArray(data?.data)
-            ? data.data
-            : Array.isArray(data?.items)
-              ? data.items
-              : [data];
-
-        const freshQuestions = rawList.filter(x => x && typeof x === "object" && !Array.isArray(x));
-        if (!freshQuestions.length) throw new Error("API không có dữ liệu phù hợp.");
-
-        const newSignature = apiSignatureFor(freshQuestions);
-        const previousSignature = localStorage.getItem(API_SIGNATURE_KEY) || "";
-        const apiChanged = !previousSignature || previousSignature !== newSignature;
-
-        questions = freshQuestions;
-        currentApiSignature = newSignature;
-
-        if (apiChanged) {
-          // API mới hoặc có thay đổi: xóa toàn bộ bài cũ nhưng tuyệt đối không xóa Họ tên + Lớp.
-          clearStoredProgress();
-          answerState = {};
-          currentIndex = 0;
-          localStorage.setItem(API_SIGNATURE_KEY, newSignature);
-        } else {
-          // API hoàn toàn giống lần trước: khôi phục tiến trình của đúng Họ tên + Lớp.
-          answerState = {};
-          currentIndex = 0;
-          restoreProgressIfCompatible();
-        }
-
-        renderQuestionPicker();
-        renderQuestion();
-        renderAnswers();
       } catch (error) {
-        // Nếu API lỗi, không đổi signature và không xóa tiến trình đang lưu.
+        console.error("Không tải được API mới nhất:", error);
+
+        // Không để 32 máy hiện trang trắng nếu Apps Script chậm trong vài giây.
+        // Chỉ dùng bản API đã tải thành công trước đó trên chính thiết bị này.
+        const cachedQuestions = await getStoredApiData();
+        if (cachedQuestions.length) {
+          questions = cachedQuestions;
+          currentApiSignature = apiSignatureFor(cachedQuestions);
+          answerState = {};
+          currentIndex = 0;
+          await restoreProgressIfCompatible();
+          renderQuestionPicker();
+          renderQuestion();
+          renderAnswers();
+          showApiNotice("Chưa lấy được dữ liệu mới nhất. Phiếu đang dùng dữ liệu đã tải thành công gần nhất trên máy này.");
+          return;
+        }
+
         questions = [];
         answerState = {};
         currentIndex = 0;
         currentApiSignature = "";
         els.answers.innerHTML = '<div class="answers-empty">Chưa tải được nhiệm vụ.</div>';
-        els.questionArea.innerHTML = '<div class="error"><strong>Không tải được nhiệm vụ mới nhất từ API.</strong><br>Hãy kiểm tra endpoint Apps Script rồi tải lại trang.<br><small>' + escapeHtml(error.message) + '</small></div>';
+        els.questionArea.innerHTML = '';
+        const box = document.createElement("div");
+        box.className = "error";
+        const strong = document.createElement("strong");
+        strong.textContent = "Không tải được nhiệm vụ mới nhất từ API.";
+        const detail = document.createElement("div");
+        detail.style.marginTop = "6px";
+        detail.textContent = axiosErrorMessage(error);
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "api-retry-btn";
+        button.style.marginTop = "10px";
+        button.textContent = "Thử tải lại";
+        button.addEventListener("click", () => loadQuestions({ force: true }));
+        box.append(strong, detail, button);
+        els.questionArea.appendChild(box);
       }
     }
 
@@ -534,15 +794,16 @@
       els.questionArea.innerHTML = "";
 
       const head = document.createElement("div");
-      head.innerHTML = `
-        <h3 class="question-title">${escapeHtml(title)}</h3>
-      `;
+      const titleEl = document.createElement("h3");
+      titleEl.className = "question-title";
+      appendTextWithLinks(titleEl, title);
+      head.appendChild(titleEl);
       els.questionArea.appendChild(head);
 
       if (content) {
         const contentEl = document.createElement("div");
         contentEl.className = "question-content";
-        contentEl.textContent = content;
+        appendTextWithLinks(contentEl, content);
         els.questionArea.appendChild(contentEl);
       }
 
@@ -586,6 +847,26 @@
       return bytes;
     }
 
+    function renderPdfIframeFallback(stage, controls, source, message = "Đang dùng trình xem PDF dự phòng trên thiết bị này.") {
+      controls.style.display = "none";
+      const driveId = googleDriveFileId(source.originalUrl);
+      const previewUrl = driveId
+        ? `https://drive.google.com/file/d/${encodeURIComponent(driveId)}/preview`
+        : source.originalUrl;
+      stage.innerHTML = "";
+      const iframe = document.createElement("iframe");
+      iframe.className = "pdf-fallback-frame";
+      iframe.src = previewUrl;
+      iframe.title = "Tài liệu PDF";
+      iframe.loading = "lazy";
+      iframe.setAttribute("allow", "autoplay");
+      stage.appendChild(iframe);
+      const note = document.createElement("div");
+      note.className = "pdf-fallback-note";
+      note.textContent = message;
+      stage.appendChild(note);
+    }
+
     async function renderPdfViewer(holder, source) {
       holder.innerHTML = "";
       const card = document.createElement("div");
@@ -620,6 +901,11 @@
 
       card.append(stage, controls, openRow);
       holder.appendChild(card);
+
+      if (Number(source.size || 0) > 3 * 1024 * 1024) {
+        renderPdfIframeFallback(stage, controls, source, "PDF khá lớn nên đang dùng trình xem dự phòng để tránh lỗi dung lượng.");
+        return;
+      }
 
       try {
         if (!window.pdfjsLib) throw new Error("Thư viện PDF chưa tải được.");
@@ -679,9 +965,8 @@
         mediaTypeCache.set(source.originalUrl, "pdf");
         await drawPage(1);
       } catch (error) {
-        console.error("Không hiển thị được PDF:", error);
-        stage.innerHTML = `<div class="pdf-error">Không hiển thị được PDF trong phiếu.<br>${escapeHtml(error.message || String(error))}</div>`;
-        controls.style.display = "none";
+        console.error("Không hiển thị được PDF bằng PDF.js:", error);
+        renderPdfIframeFallback(stage, controls, source);
       }
     }
 
@@ -701,6 +986,7 @@
           mediaTypeCache.set(url, item.type || "file");
           if (item.type === "pdf") {
             source.type = "pdf";
+            source.size = Number(item.size || 0);
             renderPdfViewer(holderMap.get(url), source);
           }
         });
@@ -782,7 +1068,7 @@
       input.style.width = Math.max(58, Math.min(520, measured)) + "px";
     }
 
-    async function localCompressImageFile(file, maxSide = 1600, quality = 0.86) {
+    async function localCompressImageFile(file, maxSide = 1400, quality = 0.80) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onerror = () => reject(new Error("Không đọc được ảnh."));
@@ -808,26 +1094,31 @@
       });
     }
 
-    async function compressImageFile(file, maxSide = 1800, quality = 0.88) {
+    async function compressImageFile(file, maxSide = 1400, quality = 0.80) {
+      // Large raw phone photos can exceed Vercel's request limit before Multer ever
+      // sees them, so compress locally first on every device. This also makes
+      // autosave/submit payloads much smaller and more reliable on mobile data.
       try {
+        return await localCompressImageFile(file, Math.min(maxSide, 1400), Math.min(quality, 0.82));
+      } catch (localError) {
+        // HEIC/less common formats may fail in some browsers. For small enough files,
+        // let Sharp on the server try to decode them as a compatibility fallback.
+        if (Number(file?.size || 0) > 3.2 * 1024 * 1024) throw localError;
         const form = new FormData();
-        form.append("image", file, file.name || "clipboard-image.png");
-        form.append("maxSide", String(maxSide));
-        form.append("quality", String(quality));
-        const response = await fetch(window.POSTTOOL_CONFIG?.imageUploadUrl || "/api/uploads/image", {
+        form.append("image", file, file.name || "clipboard-image");
+        form.append("maxSide", String(Math.min(maxSide, 1400)));
+        form.append("quality", String(Math.min(quality, 0.82)));
+        const response = await axiosRequestWithRetry({
+          url: window.POSTTOOL_CONFIG?.imageUploadUrl || "/api/uploads/image",
           method: "POST",
-          body: form,
-          cache: "no-store"
-        });
-        if (!response.ok) throw new Error("HTTP " + response.status);
-        const result = await response.json();
+          data: form,
+          timeout: 30000
+        }, { retries: 1, baseDelay: 400 });
+        const result = response.data;
         if (!result?.ok || !String(result.dataUrl || "").startsWith("data:image/")) {
           throw new Error(result?.error || "Máy chủ không trả dữ liệu ảnh hợp lệ.");
         }
         return result.dataUrl;
-      } catch (error) {
-        console.warn("Không xử lý được ảnh qua server, dùng xử lý tại trình duyệt:", error);
-        return localCompressImageFile(file, Math.min(maxSide, 1600), quality);
       }
     }
 
@@ -981,6 +1272,26 @@
         const actions = document.createElement("div");
         actions.className = "answer-actions";
 
+        const addImage = document.createElement("button");
+        addImage.type = "button";
+        addImage.className = "btn btn-secondary answer-image-button";
+        addImage.style.minHeight = "34px";
+        addImage.style.padding = "0 10px";
+        addImage.textContent = "＋ Ảnh";
+        addImage.title = "Thêm ảnh từ thiết bị";
+
+        const fileInput = document.createElement("input");
+        fileInput.type = "file";
+        fileInput.accept = "image/*";
+        fileInput.multiple = true;
+        fileInput.hidden = true;
+        addImage.addEventListener("click", () => fileInput.click());
+        fileInput.addEventListener("change", async () => {
+          const files = [...(fileInput.files || [])];
+          fileInput.value = "";
+          if (files.length) await addImageFilesToAnswer(files, item, imageContainer, editor);
+        });
+
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "btn btn-danger";
@@ -989,7 +1300,7 @@
         remove.textContent = "Xóa";
         remove.addEventListener("click", () => removeAnswer(item.id));
 
-        actions.appendChild(remove);
+        actions.append(addImage, remove, fileInput);
         top.append(num, actions);
 
         const editor = document.createElement("div");
@@ -1091,20 +1402,19 @@
     }
 
     async function apiPost(payload) {
-      const response = await fetch(API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        cache: "no-store",
-        redirect: "follow"
-      });
-      if (!response.ok) throw new Error("HTTP " + response.status);
-      const text = await response.text();
-      let data;
-      try { data = JSON.parse(text); }
-      catch (_) { throw new Error("Apps Script không trả JSON hợp lệ."); }
-      if (data && data.ok === false) throw new Error(data.error || "Apps Script báo lỗi.");
-      return data;
+      try {
+        const response = await axiosRequestWithRetry({
+          url: API_URL,
+          method: "POST",
+          data: payload,
+          timeout: 30000
+        }, { retries: 2, baseDelay: 360 });
+        const data = response.data;
+        if (data && data.ok === false) throw new Error(data.error || "Apps Script báo lỗi.");
+        return data;
+      } catch (error) {
+        throw new Error(axiosErrorMessage(error));
+      }
     }
 
     function blobToDataUrl(blob) {
@@ -1117,10 +1427,14 @@
     }
 
     async function directImageUrlToDataUrl(url) {
-      const response = await fetch(url, { mode: "cors", cache: "no-store", redirect: "follow" });
-      if (!response.ok) throw new Error("HTTP " + response.status);
-      const blob = await response.blob();
-      if (!String(blob.type || "").startsWith("image/")) throw new Error("URL không trả dữ liệu ảnh.");
+      const response = await axiosRequestWithRetry({
+        url,
+        method: "GET",
+        responseType: "blob",
+        timeout: 15000
+      }, { retries: 1, baseDelay: 350 });
+      const blob = response.data;
+      if (!String(blob?.type || "").startsWith("image/")) throw new Error("URL không trả dữ liệu ảnh.");
       return blobToDataUrl(blob);
     }
 
@@ -1166,8 +1480,19 @@
         const canvas = card.querySelector('.pdf-stage canvas');
         if (!sourceUrl || !canvas || !canvas.width || !canvas.height) return;
         try {
+          const maxWidth = 1000;
+          let exportCanvas = canvas;
+          if (canvas.width > maxWidth) {
+            exportCanvas = document.createElement("canvas");
+            exportCanvas.width = maxWidth;
+            exportCanvas.height = Math.max(1, Math.round(canvas.height * (maxWidth / canvas.width)));
+            const ctx = exportCanvas.getContext("2d", { alpha: false });
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+            ctx.drawImage(canvas, 0, 0, exportCanvas.width, exportCanvas.height);
+          }
           snapshots.set(sourceUrl, {
-            dataUrl: canvas.toDataURL('image/png'),
+            dataUrl: exportCanvas.toDataURL('image/jpeg', 0.82),
             page: Number(card.dataset.pdfPage || 1),
             pages: Number(card.dataset.pdfPages || 1)
           });
@@ -1275,26 +1600,32 @@
       return normalize(value)
         .replace(/[\\/:*?"<>|]+/g, "-")
         .replace(/\.+$/g, "")
-        .trim();
+        .trim()
+        .slice(0, 100);
     }
 
     function reportBaseName(title) {
-      const cls = safeFilePart(els.studentClass.value).toUpperCase();
-      const name = safeFilePart(els.studentName.value);
-      const lesson = safeFilePart(title || "Bài học");
+      const cls = safeFilePart(els.studentClass.value).toUpperCase().slice(0, 20);
+      const name = safeFilePart(els.studentName.value).slice(0, 60);
+      const lesson = safeFilePart(title || "Bài học").slice(0, 90);
       return `${cls}_${name}_${lesson}`;
     }
 
-    function nextLocalSubmissionNumber(baseName) {
-      const key = "student_report_local_submission__" + baseName;
-      const current = Math.max(0, Number(localStorage.getItem(key) || 0));
-      const next = current + 1;
-      localStorage.setItem(key, String(next));
-      return next;
+    function localSubmissionKey(baseName) {
+      return "student_report_local_submission__" + baseName;
+    }
+
+    function peekLocalSubmissionNumber(baseName) {
+      const current = Math.max(0, Number(safeLocalGet(localSubmissionKey(baseName)) || 0));
+      return current + 1;
+    }
+
+    function commitLocalSubmissionNumber(baseName, number) {
+      safeLocalSet(localSubmissionKey(baseName), String(Math.max(1, Number(number) || 1)));
     }
 
     function localReportFileName(baseName) {
-      return `${baseName}_${nextLocalSubmissionNumber(baseName)}.png`;
+      return `${baseName}_${peekLocalSubmissionNumber(baseName)}.png`;
     }
 
     function downloadReportCanvas(canvas, fileName) {
@@ -1327,23 +1658,236 @@
       setTimeout(() => URL.revokeObjectURL(url), 1500);
     }
 
+    function responseHeader(response, name) {
+      const headers = response?.headers || {};
+      if (typeof headers.get === "function") return headers.get(name);
+      return headers[String(name).toLowerCase()] || headers[name] || "";
+    }
+
     function responseFileName(response, fallback) {
-      const explicit = response.headers.get("X-Report-Filename");
+      const explicit = responseHeader(response, "X-Report-Filename");
       if (explicit) {
         try { return decodeURIComponent(explicit); } catch (_) { return explicit; }
       }
       return fallback;
     }
 
-    async function buildReportIllustrations(q, sources) {
-      const visuals = [];
-      const resolved = await resolveIllustrationsForExport(q, sources);
-      (resolved.images || []).forEach((item, index) => {
-        if (String(item?.dataUrl || "").startsWith("data:image/")) {
-          visuals.push({ dataUrl: item.dataUrl, alt: `Hình minh họa ${index + 1}` });
-        }
-      });
+    async function resolveFallbackIllustrations(listImage) {
+      const key = String(listImage || "").trim();
+      if (!key) return [];
+      if (illustrationResolveCache.has(key)) return illustrationResolveCache.get(key);
 
+      const promise = (async () => {
+        try {
+          const response = await axiosRequestWithRetry({
+            url: "/api/media/illustrations",
+            method: "POST",
+            data: { listImage: key },
+            timeout: 35000
+          }, { retries: 1, baseDelay: 420 });
+          const data = response.data;
+          return (Array.isArray(data?.images) ? data.images : [])
+            .filter(item => String(item?.dataUrl || "").startsWith("data:image/"));
+        } catch (error) {
+          console.warn("Không lấy được ảnh minh họa qua server:", error);
+          const fallback = [];
+          for (const url of parseImageLinks(key).slice(0, 8)) {
+            if (googleDriveFolderId(url) || looksLikePdfUrl(url)) continue;
+            try {
+              const dataUrl = await directImageUrlToDataUrl(toDisplayImageUrl(url));
+              fallback.push({ dataUrl, sourceUrl: url });
+            } catch (_) {}
+          }
+          return fallback;
+        }
+      })();
+
+      illustrationResolveCache.set(key, promise);
+      return promise;
+    }
+
+    function primeCurrentIllustrations() {
+      if (!questions.length) return;
+      const raw = getListImageValue(questions[currentIndex]);
+      const key = Array.isArray(raw) ? JSON.stringify(raw) : String(raw ?? "");
+      if (!key.trim()) return;
+      void resolveFallbackIllustrations(key);
+    }
+
+    function canvasToBlob(canvas) {
+      return new Promise((resolve, reject) => {
+        try {
+          if (canvas.toBlob) {
+            canvas.toBlob(blob => {
+              if (blob) resolve(blob);
+              else reject(new Error("Không chuyển được canvas thành PNG."));
+            }, "image/png");
+            return;
+          }
+          const dataUrl = canvas.toDataURL("image/png");
+          fetch(dataUrl).then(r => r.blob()).then(resolve, reject);
+        } catch (error) { reject(error); }
+      });
+    }
+
+    async function pngBlobWithinLimit(canvas, maxBytes = 3.35 * 1024 * 1024) {
+      let current = canvas;
+      let blob = await canvasToBlob(current);
+      let attempts = 0;
+      while (blob.size > maxBytes && current.width > 720 && attempts < 5) {
+        attempts += 1;
+        const scale = 0.84;
+        const next = document.createElement("canvas");
+        next.width = Math.max(720, Math.round(current.width * scale));
+        next.height = Math.max(1, Math.round(current.height * (next.width / current.width)));
+        const ctx = next.getContext("2d", { alpha: false });
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, next.width, next.height);
+        ctx.drawImage(current, 0, 0, next.width, next.height);
+        current = next;
+        blob = await canvasToBlob(current);
+      }
+      return blob;
+    }
+
+    async function buildClientFallbackReportBlob(payload) {
+      if (typeof window.html2canvas !== "function") {
+        throw new Error("Thư viện tạo ảnh dự phòng chưa tải được.");
+      }
+
+      const serverVisuals = await resolveFallbackIllustrations(payload.listImage);
+      const visuals = [
+        ...serverVisuals.map((item, index) => ({ dataUrl: item.dataUrl, alt: `Hình minh họa ${index + 1}`, caption: "" })),
+        ...(Array.isArray(payload.illustrations) ? payload.illustrations : [])
+      ].filter(item => String(item?.dataUrl || "").startsWith("data:image/"));
+
+      const sheet = document.createElement("div");
+      sheet.className = "export-sheet";
+      sheet.style.position = "fixed";
+      sheet.style.left = "-12000px";
+      sheet.style.top = "0";
+      sheet.style.zIndex = "-1";
+
+      const visualsHtml = visuals.length
+        ? `<div class="export-images ${visuals.length === 1 ? "single" : ""}">`
+          + visuals.map(item => `<div class="export-image-frame"><img src="${escapeHtml(item.dataUrl)}" alt="${escapeHtml(item.alt || "Hình minh họa")}">${item.caption ? `<div class="export-image-caption">${escapeHtml(item.caption)}</div>` : ""}</div>`).join("")
+          + `</div>`
+        : "";
+
+      const answersHtml = (payload.answers || []).length
+        ? payload.answers.map(answer => {
+            const images = Array.isArray(answer.images) ? answer.images.filter(src => String(src).startsWith("data:image/")) : [];
+            const imagesHtml = images.length
+              ? `<div class="export-answer-images ${images.length === 1 ? "single" : ""}">`
+                + images.map(src => `<div class="export-answer-image-frame"><img src="${escapeHtml(src)}" alt="Hình ảnh trong bài làm"></div>`).join("")
+                + `</div>`
+              : "";
+            const textHtml = String(answer.text || "").trim()
+              ? `<div>${escapeHtml(answer.text)}</div>`
+              : (!images.length ? `<div>(Chưa có nội dung)</div>` : "");
+            return `<div class="export-answer"><span class="label">${escapeHtml(answer.label || "Ô trả lời")}</span>${textHtml}${imagesHtml}</div>`;
+          }).join("")
+        : `<div class="export-answer"><span class="label">Bài làm</span>(Chưa có ô trả lời)</div>`;
+
+      sheet.innerHTML = `
+        <div class="export-banner"><h2>Phiếu trả lời</h2><p>Bài làm của học sinh</p></div>
+        <div class="export-student">
+          <div class="export-info"><small>HỌ VÀ TÊN</small>${escapeHtml(payload.studentName)}</div>
+          <div class="export-info"><small>LỚP</small>${escapeHtml(payload.studentClass)}</div>
+        </div>
+        <div class="export-q">
+          <h3>${escapeHtml(payload.title)}</h3>
+          ${payload.content ? `<div class="content">${escapeHtml(payload.content)}</div>` : ""}
+          ${visualsHtml}
+        </div>
+        <div class="export-answers"><h3>Bài làm</h3><div class="export-answer-list layout-${escapeHtml(payload.layout || "vertical")}">${answersHtml}</div></div>`;
+
+      document.body.appendChild(sheet);
+      try {
+        await waitForImages(sheet, 12000);
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const h = Math.max(1, sheet.scrollHeight);
+        const scale = Math.min(1.25, Math.max(0.45, 12000 / h));
+        const canvas = await html2canvas(sheet, {
+          scale,
+          backgroundColor: "#ffffff",
+          useCORS: true,
+          allowTaint: false,
+          logging: false,
+          imageTimeout: 10000,
+          windowWidth: 1200,
+          width: sheet.scrollWidth,
+          height: sheet.scrollHeight,
+          scrollX: 0,
+          scrollY: 0
+        });
+        return await pngBlobWithinLimit(canvas);
+      } finally {
+        sheet.remove();
+      }
+    }
+
+    async function checkSubmissionStatus(folderUrl, baseName, submissionId) {
+      if (!folderUrl || !submissionId) return null;
+      const response = await axiosRequestWithRetry({
+        url: window.POSTTOOL_CONFIG?.reportStatusUrl || "/api/reports/status",
+        method: "POST",
+        data: { folderUrl, baseName, submissionId },
+        timeout: 22000
+      }, { retries: 1, baseDelay: 500 });
+      const data = response.data || {};
+      if (data?.ok === false) throw new Error(data?.error || "Không kiểm tra được trạng thái bài nộp.");
+      return data;
+    }
+
+    async function uploadFallbackReportBlob(blob, folderUrl, baseName, submissionId = "", localAttempt = 1) {
+      const form = new FormData();
+      form.append("report", blob, `${baseName}.png`);
+      form.append("folderUrl", folderUrl);
+      form.append("baseName", baseName);
+      form.append("submissionId", submissionId);
+      form.append("localAttempt", String(Math.max(1, Number(localAttempt) || 1)));
+      const response = await axiosRequestWithRetry({
+        url: window.POSTTOOL_CONFIG?.reportFallbackUploadUrl || "/api/reports/upload",
+        method: "POST",
+        data: form,
+        timeout: 70000
+      }, { retries: 0 });
+      const data = response.data || {};
+      if (data?.ok === false) throw new Error(data?.error || "Không tải được bài nộp.");
+      return data;
+    }
+
+    async function submitWithClientFallback(payload, localAttempt, serverReason = "") {
+      els.exportBtn.textContent = "Đang tạo bài nộp trên thiết bị…";
+      const blob = await buildClientFallbackReportBlob(payload);
+      const fileName = `${payload.baseName}_${localAttempt}.png`;
+
+      if (payload.folderUrl) {
+        try {
+          els.exportBtn.textContent = "Đang tải bài lên Drive…";
+          const result = await uploadFallbackReportBlob(blob, payload.folderUrl, payload.baseName, payload.submissionId, localAttempt);
+          alert(`Đã nộp bài lên Google Drive:\n${result.fileName || "Bài nộp đã được lưu"}`);
+          return true;
+        } catch (uploadError) {
+          console.error("Upload fallback thất bại:", uploadError);
+          blobDownload(blob, fileName);
+          commitLocalSubmissionNumber(payload.baseName, localAttempt);
+          alert("Máy chủ không tải được bài lên Google Drive. Hệ thống đã tạo và tải file PNG về thiết bị để tránh mất bài.");
+          return true;
+        }
+      }
+
+      blobDownload(blob, fileName);
+      commitLocalSubmissionNumber(payload.baseName, localAttempt);
+      if (serverReason) console.warn("Đã dùng renderer dự phòng:", serverReason);
+      return true;
+    }
+
+    async function buildReportIllustrations(q, sources) {
+      // Normal List Image files are resolved by the Node server through Apps Script.
+      // The client only needs to send the currently visible PDF page snapshot.
+      const visuals = [];
       const pdfSnapshots = collectCurrentPdfSnapshots();
       sources.forEach(source => {
         const snap = pdfSnapshots.get(source.originalUrl);
@@ -1357,21 +1901,76 @@
       return visuals;
     }
 
+    async function submitViaServerRenderer(payload, localAttempt) {
+      const payloadJson = JSON.stringify(payload);
+      const payloadBytes = typeof Blob !== "undefined" ? new Blob([payloadJson]).size : payloadJson.length;
+      const maxRequestBytes = Number(window.POSTTOOL_CONFIG?.maxReportRequestBytes || 3.55 * 1024 * 1024);
+      if (payloadBytes > maxRequestBytes) {
+        throw new Error("Bài làm quá lớn để chuyển sang renderer máy chủ.");
+      }
+
+      els.exportBtn.textContent = payload.folderUrl ? "Đang thử máy chủ dự phòng…" : "Đang tạo báo cáo…";
+      const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+      const timer = controller ? setTimeout(() => controller.abort(), 70000) : null;
+      let response;
+      try {
+        response = await axiosRequestWithRetry({
+          url: window.POSTTOOL_CONFIG?.reportSubmitUrl || "/api/reports/submit",
+          method: "POST",
+          data: payload,
+          responseType: "blob",
+          timeout: 70000,
+          signal: controller?.signal
+        }, { retries: 0 });
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+
+      const contentType = String(responseHeader(response, "content-type") || "");
+      if (contentType.includes("image/png")) {
+        const blob = response.data;
+        const fallbackName = `${payload.baseName}_${localAttempt}.png`;
+        const fileName = responseFileName(response, fallbackName);
+        blobDownload(blob, fileName);
+        commitLocalSubmissionNumber(payload.baseName, localAttempt);
+        if (responseHeader(response, "X-Posttool-Upload-Fallback") === "1") {
+          alert("Không xác nhận được việc tải lên Google Drive. Hệ thống đã tải bản PNG về thiết bị để tránh mất bài.");
+        }
+        return true;
+      }
+
+      let result = {};
+      try {
+        const raw = response.data instanceof Blob ? await response.data.text() : String(response.data || "");
+        result = raw ? JSON.parse(raw) : {};
+      } catch (_) {}
+      if (result?.ok === false) {
+        const detail = result?.detail ? `
+Chi tiết kỹ thuật: ${result.detail}` : "";
+        throw new Error((result?.error || "Máy chủ không tạo được báo cáo.") + detail);
+      }
+      if (result.mode === "drive") {
+        alert(`Đã nộp bài lên Google Drive:\n${result.fileName || "Bài nộp đã được lưu"}`);
+      }
+      return true;
+    }
+
     async function exportPNG() {
+      if (submissionInFlight) return;
       if (!questions.length) {
         alert("Chưa có nhiệm vụ để nộp bài.");
         return;
       }
-
       if (!normalize(els.studentName.value) || !normalize(els.studentClass.value)) {
         alert("Em hãy nhập đầy đủ Họ và tên và Lớp trước khi nộp bài.");
         return;
       }
 
+      submissionInFlight = true;
       captureCurrentBoxSizes();
       saveProgress({ silent: true });
       els.exportBtn.disabled = true;
-      els.exportBtn.textContent = "Đang tạo bài nộp…";
+      els.exportBtn.textContent = "Đang chuẩn bị bài nộp…";
 
       try {
         const q = questions[currentIndex];
@@ -1384,6 +1983,9 @@
         const folderUrl = getFolderValue(q);
         const baseName = reportBaseName(title);
         const illustrations = await buildReportIllustrations(q, sources);
+        const rawListImage = getListImageValue(q);
+        const localAttempt = peekLocalSubmissionNumber(baseName);
+        const submissionId = createSubmissionId();
 
         const answers = list.map((answer, index) => ({
           label: answerLabel(answer, index, q),
@@ -1391,55 +1993,74 @@
           images: mergedAnswerImages(answer, domImageMap)
         }));
 
-        const localAttempt = folderUrl ? null : nextLocalSubmissionNumber(baseName);
         const payload = {
+          submissionId,
           studentName: normalize(els.studentName.value),
           studentClass: normalize(els.studentClass.value).toUpperCase(),
           title,
           content,
           layout: mode,
           folderUrl,
+          listImage: Array.isArray(rawListImage) ? JSON.stringify(rawListImage) : String(rawListImage ?? ""),
           baseName,
           localAttempt,
           answers,
           illustrations
         };
 
-        els.exportBtn.textContent = folderUrl ? "Đang nộp bài…" : "Đang tạo báo cáo…";
-        const response = await fetch(window.POSTTOOL_CONFIG?.reportSubmitUrl || "/api/reports/submit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-          cache: "no-store"
-        });
+        const strategy = String(window.POSTTOOL_CONFIG?.reportStrategy || "client-first").toLowerCase();
+        let clientError = null;
 
-        const contentType = response.headers.get("content-type") || "";
-        if (contentType.includes("image/png")) {
-          if (!response.ok) throw new Error("HTTP " + response.status);
-          const blob = await response.blob();
-          const fallback = `${baseName}_${localAttempt || 1}.png`;
-          const fileName = responseFileName(response, fallback);
-          blobDownload(blob, fileName);
-          if (response.headers.get("X-Posttool-Upload-Fallback") === "1") {
-            alert("Không tải được bài lên Google Drive. Hệ thống đã tải bản PNG về máy để tránh mất bài.");
+        // FAST PATH: giống bản web tĩnh - dựng PNG ngay trên thiết bị rồi chỉ upload
+        // một file đã nén. Không khởi động Chromium nếu không cần thiết.
+        if (strategy !== "server-first") {
+          try {
+            els.exportBtn.textContent = "Đang tạo ảnh bài làm…";
+            const blob = await buildClientFallbackReportBlob(payload);
+            if (folderUrl) {
+              els.exportBtn.textContent = "Đang tải bài lên Drive…";
+              const result = await uploadFallbackReportBlob(blob, folderUrl, baseName, submissionId, localAttempt);
+              alert(`Đã nộp bài lên Google Drive:\n${result.fileName || "Bài nộp đã được lưu"}`);
+            } else {
+              const fileName = `${baseName}_${localAttempt}.png`;
+              blobDownload(blob, fileName);
+              commitLocalSubmissionNumber(baseName, localAttempt);
+            }
+            return;
+          } catch (error) {
+            clientError = error;
+            console.warn("Fast path gặp lỗi, kiểm tra xem Drive đã nhận file chưa:", error);
+            if (folderUrl) {
+              try {
+                els.exportBtn.textContent = "Đang xác nhận bài đã nộp…";
+                const status = await checkSubmissionStatus(folderUrl, baseName, submissionId);
+                if (status?.found && status?.fileId) {
+                  alert(`Đã nộp bài lên Google Drive:
+${status.fileName || "Bài nộp đã được lưu"}`);
+                  return;
+                }
+              } catch (statusError) {
+                console.warn("Không xác nhận được trạng thái bài nộp:", statusError);
+              }
+            }
+            console.warn("Chuyển sang renderer máy chủ dự phòng.");
           }
+        }
+
+        // FALLBACK: chỉ dùng Puppeteer/Chromium nếu thiết bị không dựng/upload được.
+        try {
+          await submitViaServerRenderer(payload, localAttempt);
           return;
-        }
-
-        const result = await response.json().catch(() => ({}));
-        if (!response.ok || result?.ok === false) {
-          throw new Error(result?.error || `HTTP ${response.status}`);
-        }
-
-        if (result.mode === "drive") {
-          alert(`Đã nộp bài lên Google Drive:\n${result.fileName || "Bài nộp đã được lưu"}`);
-        } else {
-          alert("Đã tạo báo cáo thành công.");
+        } catch (serverError) {
+          console.error("Server renderer thất bại:", serverError);
+          const reason = [clientError?.message, serverError?.message].filter(Boolean).join(" | ");
+          throw new Error(reason || "Không thể nộp bài.");
         }
       } catch (error) {
         console.error(error);
-        alert("Không thể nộp bài. Hãy thử lại hoặc báo cho thầy cô kiểm tra hệ thống.\n" + (error?.message || ""));
+        alert("Không thể nộp bài. Bài làm vẫn đang được giữ trên thiết bị.\n" + (error?.message || ""));
       } finally {
+        submissionInFlight = false;
         els.exportBtn.disabled = false;
         els.exportBtn.textContent = "📤 Nộp bài";
       }
@@ -1481,12 +2102,22 @@
       });
     });
 
-    window.addEventListener("beforeunload", () => {
+    function persistBeforeLeaving() {
       saveIdentity();
       saveProgress({ silent: true });
+    }
+
+    window.addEventListener("beforeunload", persistBeforeLeaving);
+    window.addEventListener("pagehide", persistBeforeLeaving);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") persistBeforeLeaving();
     });
 
     (async function init() {
       restoreIdentity();
+      // Khi NetSupport mở đồng loạt nhiều máy, giãn request vài trăm ms để
+      // tránh toàn bộ thiết bị chạm server ở cùng một mili-giây.
+      const jitterMax = Math.max(0, Number(window.POSTTOOL_CONFIG?.startupJitterMs || 350));
+      if (jitterMax > 0) await sleepClient(Math.floor(Math.random() * jitterMax));
       await loadQuestions();
     })();

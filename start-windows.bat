@@ -1,9 +1,11 @@
 @echo off
 cd /d "%~dp0"
-if not exist node_modules (
-  echo Dang cai thu vien...
-  call npm install
-  if errorlevel 1 pause & exit /b 1
+echo Kiem tra/cap nhat thu vien Posttool...
+call npm install --no-audit --no-fund
+if errorlevel 1 (
+  echo Khong cai duoc thu vien. Hay kiem tra Node.js va ket noi Internet.
+  pause
+  exit /b 1
 )
 start "" http://localhost:3000
 npm start
