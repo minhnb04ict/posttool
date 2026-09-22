@@ -1,3 +1,7 @@
+# Posttool 1.3.4 - Vercel Safe
+
+Bản này loại Puppeteer/Chromium/Sharp khỏi đường khởi động Vercel. Báo cáo mặc định được dựng trên trình duyệt bằng html2canvas rồi upload PNG qua Express -> Apps Script -> Drive. Điều này tránh lỗi FUNCTION_INVOCATION_FAILED do native/browser dependencies ở cold start.
+
 # Posttool 1.3.2
 
 > **Fast Upload + chống nộp trùng.** Mỗi lần bấm **Nộp bài** tạo một `submissionId` duy nhất. Google Apps Script ghi nhớ mã này nên retry, timeout hoặc chuyển sang fallback vẫn trả về đúng file đã tạo thay vì tạo `_1`, `_2` cho cùng một lần bấm.

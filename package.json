@@ -1,8 +1,8 @@
 {
   "name": "posttool",
-  "version": "1.3.3",
+  "version": "1.3.4",
   "private": true,
-  "description": "Phiếu trả lời - Express + EJS + Axios + resilient classroom API loading + hybrid report rendering",
+  "description": "Phiếu trả lời - Express + EJS + Axios + classroom load optimization + Vercel-safe client report rendering",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -11,7 +11,7 @@
     "check": "node scripts/self-check.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
     "compression": "^1.8.1",
@@ -23,9 +23,6 @@
     "morgan": "^1.10.0",
     "multer": "^2.0.2",
     "pdfjs-dist": "3.11.174",
-    "puppeteer-core": "25.10.0",
-    "sharp": "^0.34.3",
-    "@sparticuz/chromium": "152.0.0",
     "html2canvas": "^1.4.1",
     "axios": "^1.20.0"
   }

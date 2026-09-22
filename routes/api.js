@@ -1,11 +1,9 @@
 const express = require('express');
 const multer = require('multer');
-const sharp = require('sharp');
 const contentDisposition = require('content-disposition');
 const upload = require('../middleware/imageUpload');
 const gas = require('../services/googleAppsScript');
 const taskCache = require('../services/taskCache');
-const { renderReportPng } = require('../services/reportRenderer');
 
 const router = express.Router();
 
@@ -122,22 +120,13 @@ async function resolveServerIllustrations(report) {
 }
 
 
-async function compressIllustrationDataUrl(dataUrl, targetBytes = 260 * 1024) {
-  const match = String(dataUrl || '').match(/^data:image\/[a-zA-Z0-9.+-]+;base64,(.+)$/);
-  if (!match) return '';
-  const input = Buffer.from(match[1], 'base64');
-  for (const quality of [78, 68, 58]) {
-    const output = await sharp(input, { limitInputPixels: 80_000_000 })
-      .rotate()
-      .flatten({ background: '#ffffff' })
-      .resize({ width: 1100, height: 1100, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality, mozjpeg: true })
-      .toBuffer();
-    if (output.length <= targetBytes || quality === 58) {
-      return `data:image/jpeg;base64,${output.toString('base64')}`;
-    }
-  }
-  return '';
+function compressIllustrationDataUrl(dataUrl, targetBytes = 650 * 1024) {
+  const value = String(dataUrl || '');
+  if (!value.startsWith('data:image/')) return '';
+  // Vercel-safe build avoids native Sharp. Keep already-small images only.
+  // Large illustrations remain available in the browser and are rendered there.
+  const estimatedBytes = Math.floor(value.length * 0.75);
+  return estimatedBytes <= targetBytes ? value : '';
 }
 
 async function uploadPngToDrive({ png, folderUrl, baseName, submissionId = '', preferredAttempt = 1 }) {
@@ -246,23 +235,15 @@ router.post('/media/illustrations', async (req, res) => {
 router.post('/uploads/image', upload.single('image'), async (req, res) => {
   try {
     if (!req.file?.buffer) return res.status(400).json({ ok: false, error: 'Chưa nhận được hình ảnh.' });
-    const maxSide = Math.round(clamp(req.body?.maxSide, 600, 2200, 1400));
-    const quality = Math.round(clamp(Number(req.body?.quality) * 100, 60, 92, 80));
-
-    const result = await sharp(req.file.buffer, { limitInputPixels: 60_000_000 })
-      .rotate()
-      .flatten({ background: '#ffffff' })
-      .resize({ width: maxSide, height: maxSide, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality, mozjpeg: true })
-      .toBuffer({ resolveWithObject: true });
-
-    res.set('Cache-Control', 'no-store').json({
-      ok: true,
-      mimeType: 'image/jpeg',
-      width: result.info.width,
-      height: result.info.height,
-      dataUrl: `data:image/jpeg;base64,${result.data.toString('base64')}`
-    });
+    const mimeType = String(req.file.mimetype || '').toLowerCase();
+    if (!/^image\/(png|jpe?g|webp|gif)$/i.test(mimeType)) {
+      return res.status(415).json({
+        ok: false,
+        error: 'Định dạng ảnh này cần được trình duyệt chuyển đổi trước khi tải lên. Hãy dùng PNG, JPG, WEBP hoặc GIF.'
+      });
+    }
+    const dataUrl = `data:${mimeType};base64,${req.file.buffer.toString('base64')}`;
+    res.set('Cache-Control', 'no-store').json({ ok: true, mimeType, dataUrl, passthrough: true });
   } catch (error) {
     console.error('[POST /api/uploads/image]', error);
     res.status(400).json({ ok: false, error: 'Không xử lý được hình ảnh.', detail: error.message });
@@ -290,57 +271,15 @@ router.post('/reports/status', async (req, res) => {
   }
 });
 
-router.post('/reports/submit', async (req, res) => {
-  let report;
-  try {
-    report = buildReportPayload(req.body || {});
-    await resolveServerIllustrations(report);
-    const png = await renderReportPng(report);
-
-    if (report.folderUrl) {
-      try {
-        const result = await uploadPngToDrive({ png, folderUrl: report.folderUrl, baseName: report.baseName, submissionId: report.submissionId, preferredAttempt: report.localAttempt });
-        return res.json({
-          ok: true,
-          mode: 'drive',
-          fileName: result.fileName || '',
-          fileId: result.fileId || '',
-          fileUrl: result.fileUrl || ''
-        });
-      } catch (uploadError) {
-        console.error('[Drive upload fallback]', uploadError);
-        const fallbackName = `${report.baseName}_${report.localAttempt}.png`;
-        return res.status(200)
-          .set('Cache-Control', 'no-store')
-          .set('X-Posttool-Upload-Fallback', '1')
-          .set('X-Report-Filename', encodeURIComponent(fallbackName))
-          .set('Content-Disposition', contentDisposition(fallbackName))
-          .type('png')
-          .send(png);
-      }
-    }
-
-    const fileName = `${report.baseName}_${report.localAttempt}.png`;
-    return res.status(200)
-      .set('Cache-Control', 'no-store')
-      .set('X-Report-Filename', encodeURIComponent(fileName))
-      .set('Content-Disposition', contentDisposition(fileName))
-      .type('png')
-      .send(png);
-  } catch (error) {
-    console.error('[POST /api/reports/submit]', error);
-    const message = error?.message || String(error);
-    const chromiumError = /chrom(e|ium)|executable|browser|libns|libnss|libnspr|protocol|target|session/i.test(message);
-    res.status(500).json({
-      ok: false,
-      code: chromiumError ? 'REPORT_CHROMIUM_ERROR' : 'REPORT_RENDER_ERROR',
-      fallbackRequired: true,
-      error: chromiumError
-        ? 'Máy chủ không khởi động được Chromium để tạo ảnh báo cáo.'
-        : 'Không tạo được ảnh báo cáo trên máy chủ.',
-      detail: message
-    });
-  }
+router.post('/reports/submit', async (_req, res) => {
+  // Vercel-safe mode intentionally avoids Puppeteer/Chromium/Sharp in the
+  // main Express function. The browser renderer is the primary path.
+  return res.status(503).set('Cache-Control', 'no-store').json({
+    ok: false,
+    code: 'CLIENT_RENDER_REQUIRED',
+    fallbackRequired: true,
+    error: 'Renderer máy chủ đã được tắt trên Vercel để tăng độ ổn định. Hãy dùng renderer trên thiết bị.'
+  });
 });
 
 // Client-side report fallback: if Chromium is unavailable, the browser creates a

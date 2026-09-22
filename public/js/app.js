@@ -1852,7 +1852,7 @@
         method: "POST",
         data: form,
         timeout: 70000
-      }, { retries: 0 });
+      }, { retries: 1, baseDelay: 700 });
       const data = response.data || {};
       if (data?.ok === false) throw new Error(data?.error || "Không tải được bài nộp.");
       return data;
@@ -2047,15 +2047,11 @@ ${status.fileName || "Bài nộp đã được lưu"}`);
           }
         }
 
-        // FALLBACK: chỉ dùng Puppeteer/Chromium nếu thiết bị không dựng/upload được.
-        try {
-          await submitViaServerRenderer(payload, localAttempt);
-          return;
-        } catch (serverError) {
-          console.error("Server renderer thất bại:", serverError);
-          const reason = [clientError?.message, serverError?.message].filter(Boolean).join(" | ");
-          throw new Error(reason || "Không thể nộp bài.");
-        }
+        // Vercel-safe build: không gọi Chromium/Sharp ở server. Nếu client render
+        // đã thất bại, giữ nguyên bài trên thiết bị và báo lỗi rõ ràng thay vì
+        // làm crash toàn bộ Vercel Function.
+        const reason = clientError?.message || "Thiết bị không dựng được ảnh bài nộp.";
+        throw new Error(reason);
       } catch (error) {
         console.error(error);
         alert("Không thể nộp bài. Bài làm vẫn đang được giữ trên thiết bị.\n" + (error?.message || ""));

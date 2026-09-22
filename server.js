@@ -8,11 +8,10 @@ const morgan = require('morgan');
 const apiRouter = require('./routes/api');
 const gas = require('./services/googleAppsScript');
 const taskCache = require('./services/taskCache');
-const { closeBrowser, rendererInfo, probeRenderer } = require('./services/reportRenderer');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
-const APP_VERSION = '1.3.3';
+const APP_VERSION = '1.3.4';
 const isVercel = Boolean(process.env.VERCEL);
 const jsonLimit = process.env.REPORT_JSON_LIMIT || '4mb';
 
@@ -69,18 +68,18 @@ app.get('/health', async (req, res) => {
       vercel: isVercel,
       environment: process.env.NODE_ENV || 'development'
     },
-    reportRenderer: rendererInfo(),
+    reportRenderer: { type: 'client-html2canvas', runtime: 'browser', serverFallback: false },
     appsScriptConfigured: Boolean(gas.APPS_SCRIPT_URL),
     taskCache: taskCache.stats()
   };
 
   if (String(req.query.deep || '') === '1') {
-    const [appsScript, renderer] = await Promise.all([
-      gas.health(),
-      probeRenderer()
-    ]);
-    payload.checks = { appsScript, renderer };
-    payload.ok = Boolean(appsScript.ok && renderer.ok);
+    const appsScript = await gas.health();
+    payload.checks = {
+      appsScript,
+      renderer: { ok: true, type: 'client-html2canvas', note: 'Báo cáo được dựng trên thiết bị để tránh phụ thuộc Chromium/Sharp trên Vercel.' }
+    };
+    payload.ok = Boolean(appsScript.ok);
   }
 
   res.status(payload.ok ? 200 : 503).set('Cache-Control', 'no-store').json(payload);
@@ -109,13 +108,12 @@ if (!isVercel && require.main === module) {
   server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`Posttool đang chạy tại http://localhost:${PORT}`);
     console.log(`Google Apps Script: ${gas.APPS_SCRIPT_URL}`);
-    console.log('Report renderer:', rendererInfo());
+    console.log('Report renderer: client-html2canvas');
   });
 
   async function shutdown(signal) {
     console.log(`\n${signal}: đang dừng Posttool...`);
     server.close(async () => {
-      await closeBrowser();
       process.exit(0);
     });
     setTimeout(() => process.exit(1), 8000).unref();
