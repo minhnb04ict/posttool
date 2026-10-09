@@ -60,8 +60,9 @@
     const PROGRESS_PREFIX = "student_reflection_progress_v6__";
 
     const PROGRESS_DB_NAME = "posttool_progress_db";
-    const PROGRESS_DB_VERSION = 1;
+    const PROGRESS_DB_VERSION = 2;
     const PROGRESS_STORE = "progress";
+    const SUBMISSION_STORE = "submissions";
     let progressDbPromise = null;
 
     function safeLocalGet(key) {
@@ -85,6 +86,7 @@
             req.onupgradeneeded = () => {
               const db = req.result;
               if (!db.objectStoreNames.contains(PROGRESS_STORE)) db.createObjectStore(PROGRESS_STORE);
+              if (!db.objectStoreNames.contains(SUBMISSION_STORE)) db.createObjectStore(SUBMISSION_STORE);
             };
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => resolve(null);
@@ -116,6 +118,33 @@
         try {
           const tx = db.transaction(PROGRESS_STORE, "readonly");
           const req = tx.objectStore(PROGRESS_STORE).get(key);
+          req.onsuccess = () => resolve(req.result || null);
+          req.onerror = () => resolve(null);
+        } catch (_) { resolve(null); }
+      });
+    }
+
+    async function idbPutSubmission(key, value) {
+      const db = await openProgressDb();
+      if (!db) return false;
+      return new Promise(resolve => {
+        try {
+          const tx = db.transaction(SUBMISSION_STORE, "readwrite");
+          tx.objectStore(SUBMISSION_STORE).put(value, key);
+          tx.oncomplete = () => resolve(true);
+          tx.onerror = () => resolve(false);
+          tx.onabort = () => resolve(false);
+        } catch (_) { resolve(false); }
+      });
+    }
+
+    async function idbGetSubmission(key) {
+      const db = await openProgressDb();
+      if (!db) return null;
+      return new Promise(resolve => {
+        try {
+          const tx = db.transaction(SUBMISSION_STORE, "readonly");
+          const req = tx.objectStore(SUBMISSION_STORE).get(key);
           req.onsuccess = () => resolve(req.result || null);
           req.onerror = () => resolve(null);
         } catch (_) { resolve(null); }
@@ -175,7 +204,15 @@
       questionPicker: document.getElementById("questionPicker"),
       answers: document.getElementById("answers"),
       addAnswerBtn: document.getElementById("addAnswerBtn"),
-      exportBtn: document.getElementById("exportBtn")
+      exportBtn: document.getElementById("exportBtn"),
+      submissionStatus: document.getElementById("submissionStatus"),
+      resultModal: document.getElementById("resultModal"),
+      resultModalCard: document.getElementById("resultModalCard"),
+      resultModalIcon: document.getElementById("resultModalIcon"),
+      resultModalTitle: document.getElementById("resultModalTitle"),
+      resultModalMessage: document.getElementById("resultModalMessage"),
+      resultModalDetail: document.getElementById("resultModalDetail"),
+      resultModalConfirm: document.getElementById("resultModalConfirm")
     };
 
     let questions = [];
@@ -185,6 +222,9 @@
     let autoSaveTimer = null;
     let currentApiSignature = "";
     let submissionInFlight = false;
+    let submissionStatusTimer = null;
+    let submissionStatusRequestId = 0;
+    let modalResolver = null;
     const illustrationResolveCache = new Map();
 
     function normalize(s) {
@@ -701,6 +741,7 @@
       renderQuestionPicker();
       renderQuestion();
       renderAnswers();
+      void refreshSubmissionStatus();
     }
 
     async function loadQuestions({ force = false } = {}) {
@@ -737,6 +778,7 @@
           renderQuestionPicker();
           renderQuestion();
           renderAnswers();
+          void refreshSubmissionStatus();
           showApiNotice("Chưa lấy được dữ liệu mới nhất. Phiếu đang dùng dữ liệu đã tải thành công gần nhất trên máy này.");
           return;
         }
@@ -1615,17 +1657,169 @@
       return "student_report_local_submission__" + baseName;
     }
 
-    function peekLocalSubmissionNumber(baseName) {
-      const current = Math.max(0, Number(safeLocalGet(localSubmissionKey(baseName)) || 0));
-      return current + 1;
+    function normalizeSubmissionRecord(value, baseName = "") {
+      if (!value) return null;
+      if (typeof value === "number" || (typeof value === "string" && /^\d+$/.test(value.trim()))) {
+        const attempt = Math.max(0, Number(value) || 0);
+        return attempt ? { baseName, attempt, submittedAt: "" } : null;
+      }
+      const obj = typeof value === "string" ? safeJSON(value) : value;
+      if (!obj || typeof obj !== "object") return null;
+      const attempt = Math.max(0, Number(obj.attempt || obj.number || 0) || 0);
+      if (!attempt) return null;
+      return {
+        baseName: String(obj.baseName || baseName || ""),
+        attempt,
+        fileName: String(obj.fileName || ""),
+        fileId: String(obj.fileId || ""),
+        fileUrl: String(obj.fileUrl || ""),
+        submittedAt: String(obj.submittedAt || ""),
+        title: String(obj.title || ""),
+        studentName: String(obj.studentName || ""),
+        studentClass: String(obj.studentClass || "")
+      };
     }
 
-    function commitLocalSubmissionNumber(baseName, number) {
-      safeLocalSet(localSubmissionKey(baseName), String(Math.max(1, Number(number) || 1)));
+    function submissionRecordFromLocal(baseName) {
+      return normalizeSubmissionRecord(safeLocalGet(localSubmissionKey(baseName)), baseName);
     }
 
-    function localReportFileName(baseName) {
-      return `${baseName}_${peekLocalSubmissionNumber(baseName)}.png`;
+    async function getSuccessfulSubmission(baseName) {
+      if (!baseName) return null;
+      const local = submissionRecordFromLocal(baseName);
+      const dbRecord = normalizeSubmissionRecord(await idbGetSubmission(baseName), baseName);
+      const candidates = [local, dbRecord].filter(Boolean);
+      if (!candidates.length) return null;
+      candidates.sort((a, b) => {
+        if (b.attempt !== a.attempt) return b.attempt - a.attempt;
+        return String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
+      });
+      const best = candidates[0];
+      // Đồng bộ lại cả hai nơi nếu một nơi bị thiếu/cũ.
+      safeLocalSet(localSubmissionKey(baseName), JSON.stringify(best));
+      void idbPutSubmission(baseName, best);
+      return best;
+    }
+
+    async function nextLocalSubmissionNumber(baseName) {
+      const record = await getSuccessfulSubmission(baseName);
+      return Math.max(0, Number(record?.attempt || 0)) + 1;
+    }
+
+    function attemptFromResult(result, fallback = 1) {
+      const direct = Number(result?.attempt || 0);
+      if (Number.isFinite(direct) && direct > 0) return Math.floor(direct);
+      const match = String(result?.fileName || "").match(/_(\d+)\.png$/i);
+      if (match) return Math.max(1, Number(match[1]) || 1);
+      return Math.max(1, Number(fallback) || 1);
+    }
+
+    async function commitSuccessfulSubmission(baseName, number, result = {}, title = "") {
+      const attempt = Math.max(1, Number(number) || 1);
+      const record = {
+        baseName,
+        attempt,
+        fileName: String(result?.fileName || `${baseName}_${attempt}.png`),
+        fileId: String(result?.fileId || ""),
+        fileUrl: String(result?.fileUrl || ""),
+        submittedAt: new Date().toISOString(),
+        title: String(title || ""),
+        studentName: normalize(els.studentName.value),
+        studentClass: normalize(els.studentClass.value).toUpperCase()
+      };
+      safeLocalSet(localSubmissionKey(baseName), JSON.stringify(record));
+      await idbPutSubmission(baseName, record);
+      renderSubmissionStatus(record);
+      return record;
+    }
+
+    function renderSubmissionStatus(record) {
+      if (!els.submissionStatus) return;
+      if (!record?.attempt) {
+        els.submissionStatus.hidden = true;
+        els.submissionStatus.textContent = "";
+        els.submissionStatus.removeAttribute("title");
+        return;
+      }
+      els.submissionStatus.hidden = false;
+      els.submissionStatus.textContent = `✓ Đã nộp bài thành công lần ${record.attempt}`;
+      if (record.submittedAt) {
+        const date = new Date(record.submittedAt);
+        if (!Number.isNaN(date.getTime())) {
+          els.submissionStatus.title = `Lần nộp gần nhất: ${date.toLocaleString("vi-VN")}`;
+        }
+      }
+    }
+
+    async function refreshSubmissionStatus() {
+      const requestId = ++submissionStatusRequestId;
+      if (!questions.length || !normalize(els.studentName.value) || !normalize(els.studentClass.value)) {
+        renderSubmissionStatus(null);
+        return;
+      }
+      const title = displayTitle(questions[currentIndex], currentIndex);
+      const baseName = reportBaseName(title);
+      const record = await getSuccessfulSubmission(baseName);
+      if (requestId !== submissionStatusRequestId) return;
+      renderSubmissionStatus(record);
+    }
+
+    function scheduleSubmissionStatusRefresh() {
+      clearTimeout(submissionStatusTimer);
+      submissionStatusTimer = setTimeout(() => void refreshSubmissionStatus(), 250);
+    }
+
+    function showResultPopup({ type = "success", title = "Thông báo", message = "", detail = "" } = {}) {
+      if (!els.resultModal || !els.resultModalConfirm) {
+        // Fallback cực hiếm nếu HTML/CSS chưa tải đồng bộ.
+        return Promise.resolve();
+      }
+      if (modalResolver) {
+        try { modalResolver(); } catch (_) {}
+        modalResolver = null;
+      }
+      const isSuccess = type === "success";
+      const isWarning = type === "warning";
+      els.resultModalCard.className = `result-modal-card ${isSuccess ? "is-success" : isWarning ? "is-warning" : "is-error"}`;
+      els.resultModalIcon.textContent = isSuccess ? "✓" : isWarning ? "!" : "×";
+      els.resultModalTitle.textContent = title;
+      els.resultModalMessage.textContent = message;
+      els.resultModalDetail.textContent = detail || "";
+      els.resultModalDetail.hidden = !detail;
+      els.resultModal.hidden = false;
+      els.resultModal.setAttribute("aria-hidden", "false");
+      document.body.classList.add("modal-open");
+      setTimeout(() => els.resultModalConfirm.focus(), 0);
+
+      return new Promise(resolve => {
+        modalResolver = resolve;
+      });
+    }
+
+    function closeResultPopup() {
+      if (!els.resultModal || els.resultModal.hidden) return;
+      els.resultModal.hidden = true;
+      els.resultModal.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("modal-open");
+      const resolve = modalResolver;
+      modalResolver = null;
+      if (resolve) resolve();
+    }
+
+    async function announceSubmissionSuccess(baseName, result, fallbackAttempt, title) {
+      const attempt = attemptFromResult(result, fallbackAttempt);
+      const record = await commitSuccessfulSubmission(baseName, attempt, result, title);
+      await showResultPopup({
+        type: "success",
+        title: "Nộp bài thành công",
+        message: `Bài làm đã được ghi nhận thành công lần ${record.attempt}.`,
+        detail: record.fileName ? `Tên file: ${record.fileName}` : ""
+      });
+      return record;
+    }
+
+    function localReportFileName(baseName, attempt = 1) {
+      return `${baseName}_${Math.max(1, Number(attempt) || 1)}.png`;
     }
 
     function downloadReportCanvas(canvas, fileName) {
@@ -1867,19 +2061,23 @@
         try {
           els.exportBtn.textContent = "Đang tải bài lên Drive…";
           const result = await uploadFallbackReportBlob(blob, payload.folderUrl, payload.baseName, payload.submissionId, localAttempt);
-          alert(`Đã nộp bài lên Google Drive:\n${result.fileName || "Bài nộp đã được lưu"}`);
+          await announceSubmissionSuccess(payload.baseName, result, localAttempt, payload.title);
           return true;
         } catch (uploadError) {
           console.error("Upload fallback thất bại:", uploadError);
           blobDownload(blob, fileName);
-          commitLocalSubmissionNumber(payload.baseName, localAttempt);
-          alert("Máy chủ không tải được bài lên Google Drive. Hệ thống đã tạo và tải file PNG về thiết bị để tránh mất bài.");
+          await showResultPopup({
+            type: "warning",
+            title: "Chưa nộp được lên Google Drive",
+            message: "Hệ thống đã tải bản PNG về thiết bị để tránh mất bài.",
+            detail: "Bài này chưa được tính là một lần nộp thành công trên hệ thống."
+          });
           return true;
         }
       }
 
       blobDownload(blob, fileName);
-      commitLocalSubmissionNumber(payload.baseName, localAttempt);
+      await announceSubmissionSuccess(payload.baseName, { fileName }, localAttempt, payload.title);
       if (serverReason) console.warn("Đã dùng renderer dự phòng:", serverReason);
       return true;
     }
@@ -1932,9 +2130,15 @@
         const fallbackName = `${payload.baseName}_${localAttempt}.png`;
         const fileName = responseFileName(response, fallbackName);
         blobDownload(blob, fileName);
-        commitLocalSubmissionNumber(payload.baseName, localAttempt);
         if (responseHeader(response, "X-Posttool-Upload-Fallback") === "1") {
-          alert("Không xác nhận được việc tải lên Google Drive. Hệ thống đã tải bản PNG về thiết bị để tránh mất bài.");
+          await showResultPopup({
+            type: "warning",
+            title: "Chưa xác nhận được bài nộp",
+            message: "Hệ thống đã tải bản PNG về thiết bị để tránh mất bài.",
+            detail: "Bài này chưa được tính là một lần nộp thành công trên hệ thống."
+          });
+        } else {
+          await announceSubmissionSuccess(payload.baseName, { fileName }, localAttempt, payload.title);
         }
         return true;
       }
@@ -1950,7 +2154,7 @@ Chi tiết kỹ thuật: ${result.detail}` : "";
         throw new Error((result?.error || "Máy chủ không tạo được báo cáo.") + detail);
       }
       if (result.mode === "drive") {
-        alert(`Đã nộp bài lên Google Drive:\n${result.fileName || "Bài nộp đã được lưu"}`);
+        await announceSubmissionSuccess(payload.baseName, result, localAttempt, payload.title);
       }
       return true;
     }
@@ -1958,11 +2162,20 @@ Chi tiết kỹ thuật: ${result.detail}` : "";
     async function exportPNG() {
       if (submissionInFlight) return;
       if (!questions.length) {
-        alert("Chưa có nhiệm vụ để nộp bài.");
+        await showResultPopup({
+          type: "warning",
+          title: "Chưa thể nộp bài",
+          message: "Chưa có nhiệm vụ để nộp bài.",
+          detail: "Hãy tải lại dữ liệu nhiệm vụ rồi thử lại."
+        });
         return;
       }
       if (!normalize(els.studentName.value) || !normalize(els.studentClass.value)) {
-        alert("Em hãy nhập đầy đủ Họ và tên và Lớp trước khi nộp bài.");
+        await showResultPopup({
+          type: "warning",
+          title: "Thiếu thông tin học sinh",
+          message: "Em hãy nhập đầy đủ Họ và tên và Lớp trước khi nộp bài."
+        });
         return;
       }
 
@@ -1984,7 +2197,7 @@ Chi tiết kỹ thuật: ${result.detail}` : "";
         const baseName = reportBaseName(title);
         const illustrations = await buildReportIllustrations(q, sources);
         const rawListImage = getListImageValue(q);
-        const localAttempt = peekLocalSubmissionNumber(baseName);
+        const localAttempt = await nextLocalSubmissionNumber(baseName);
         const submissionId = createSubmissionId();
 
         const answers = list.map((answer, index) => ({
@@ -2020,11 +2233,11 @@ Chi tiết kỹ thuật: ${result.detail}` : "";
             if (folderUrl) {
               els.exportBtn.textContent = "Đang tải bài lên Drive…";
               const result = await uploadFallbackReportBlob(blob, folderUrl, baseName, submissionId, localAttempt);
-              alert(`Đã nộp bài lên Google Drive:\n${result.fileName || "Bài nộp đã được lưu"}`);
+              await announceSubmissionSuccess(baseName, result, localAttempt, title);
             } else {
               const fileName = `${baseName}_${localAttempt}.png`;
               blobDownload(blob, fileName);
-              commitLocalSubmissionNumber(baseName, localAttempt);
+              await announceSubmissionSuccess(baseName, { fileName }, localAttempt, title);
             }
             return;
           } catch (error) {
@@ -2035,8 +2248,7 @@ Chi tiết kỹ thuật: ${result.detail}` : "";
                 els.exportBtn.textContent = "Đang xác nhận bài đã nộp…";
                 const status = await checkSubmissionStatus(folderUrl, baseName, submissionId);
                 if (status?.found && status?.fileId) {
-                  alert(`Đã nộp bài lên Google Drive:
-${status.fileName || "Bài nộp đã được lưu"}`);
+                  await announceSubmissionSuccess(baseName, status, localAttempt, title);
                   return;
                 }
               } catch (statusError) {
@@ -2054,7 +2266,12 @@ ${status.fileName || "Bài nộp đã được lưu"}`);
         throw new Error(reason);
       } catch (error) {
         console.error(error);
-        alert("Không thể nộp bài. Bài làm vẫn đang được giữ trên thiết bị.\n" + (error?.message || ""));
+        await showResultPopup({
+          type: "error",
+          title: "Nộp bài chưa thành công",
+          message: "Bài làm vẫn đang được giữ trên thiết bị.",
+          detail: String(error?.message || "Vui lòng thử nộp lại sau.")
+        });
       } finally {
         submissionInFlight = false;
         els.exportBtn.disabled = false;
@@ -2078,23 +2295,27 @@ ${status.fileName || "Bài nộp đã được lưu"}`);
 
     els.addAnswerBtn.addEventListener("click", addAnswer);
     els.exportBtn.addEventListener("click", exportPNG);
+    els.resultModalConfirm?.addEventListener("click", closeResultPopup);
 
     els.questionPicker.addEventListener("change", () => {
       captureCurrentBoxSizes();
       currentIndex = Number(els.questionPicker.value || 0);
       renderQuestion();
       renderAnswers();
+      scheduleSubmissionStatusRefresh();
       scheduleAutoSave();
     });
 
     [els.studentName, els.studentClass].forEach(input => {
       input.addEventListener("input", () => {
         scheduleIdentitySave();
+        scheduleSubmissionStatusRefresh();
         scheduleAutoSave();
       });
       input.addEventListener("change", () => {
         saveIdentity();
         saveProgress({ silent: true });
+        void refreshSubmissionStatus();
       });
     });
 

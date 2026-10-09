@@ -44,12 +44,23 @@
         <div class="toolbar">
           <button class="btn btn-blue" id="addAnswerBtn">＋ Thêm ô trả lời</button>
           <button class="btn btn-success" id="exportBtn">📤 Nộp bài</button>
+          <span class="submission-status" id="submissionStatus" hidden></span>
           <span class="status" id="autoSaveStatus" hidden></span>
         </div>
       </section>
     </div>
 
   </main>
+
+  <div class="result-modal" id="resultModal" hidden aria-hidden="true">
+    <div class="result-modal-card is-success" id="resultModalCard" role="dialog" aria-modal="true" aria-labelledby="resultModalTitle">
+      <div class="result-modal-icon" id="resultModalIcon" aria-hidden="true">✓</div>
+      <h2 id="resultModalTitle">Nộp bài thành công</h2>
+      <p id="resultModalMessage"></p>
+      <div class="result-modal-detail" id="resultModalDetail" hidden></div>
+      <button type="button" class="result-modal-confirm" id="resultModalConfirm">Xác nhận</button>
+    </div>
+  </div>
 
   <script>
     window.POSTTOOL_CONFIG = <%- JSON.stringify(clientConfig) %>;

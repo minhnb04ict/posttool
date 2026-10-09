@@ -1,5 +1,16 @@
 # Posttool 1.3.4 - Vercel Safe
 
+## Cập nhật 1.3.5 – Popup kết quả & lưu số lần nộp
+
+- Kết quả sau khi bấm **Nộp bài** không còn dùng `alert()`.
+- Hiển thị popup kết quả với nút **Xác nhận**.
+- Khi Google Drive xác nhận thành công, Posttool lưu **số lần nộp thực tế** do Apps Script trả về.
+- Thanh trạng thái hiển thị `✓ Đã nộp bài thành công lần N` và tự khôi phục khi mở lại trang.
+- Trạng thái nộp được lưu song song trong `localStorage` và một object store riêng của `IndexedDB`, độc lập với dữ liệu tiến trình làm bài.
+- Nếu API thay đổi và tiến trình bài làm bị reset, lịch sử số lần nộp của cùng Họ tên + Lớp + Title không bị xóa.
+- Nếu upload Drive thất bại, popup cảnh báo rõ và **không tăng số lần nộp thành công**.
+
+
 Bản này loại Puppeteer/Chromium/Sharp khỏi đường khởi động Vercel. Báo cáo mặc định được dựng trên trình duyệt bằng html2canvas rồi upload PNG qua Express -> Apps Script -> Drive. Điều này tránh lỗi FUNCTION_INVOCATION_FAILED do native/browser dependencies ở cold start.
 
 # Posttool 1.3.2
