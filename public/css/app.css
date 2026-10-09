@@ -317,7 +317,7 @@
 
     .answer-top {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       justify-content: space-between;
       gap: 10px;
       margin-bottom: 9px;
@@ -325,7 +325,7 @@
 
     .answer-number {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       flex: 1;
       min-width: 0;
       font-weight: 850;
@@ -346,23 +346,32 @@
       color: var(--vin-red);
       font-size: 12px;
       flex-shrink: 0;
+      margin-top: 4px;
     }
 
-    /* Tên textbox là chữ chỉnh sửa trực tiếp: không khung, rộng theo nội dung */
+    /* Tên textbox là textarea không khung: tên ngắn 1 dòng, tên dài tự xuống dòng. */
     .answer-name-input {
       flex: 0 1 auto;
       min-width: 58px;
       max-width: calc(100% - 8px);
+      min-height: 34px;
       height: 34px;
-      padding: 4px 2px;
+      padding: 5px 2px 3px;
       border: 0;
       border-radius: 0;
       background: transparent;
       color: #344054;
+      font-family: inherit;
       font-weight: 850;
       font-size: 16px;
+      line-height: 1.35;
       outline: none;
       box-shadow: none;
+      resize: none;
+      overflow: hidden;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .answer-name-input:focus {

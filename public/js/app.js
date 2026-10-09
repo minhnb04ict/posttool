@@ -1105,9 +1105,19 @@
       const canvas = fitNameInput.canvas || (fitNameInput.canvas = document.createElement("canvas"));
       const ctx = canvas.getContext("2d");
       ctx.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+
       const text = input.value || input.placeholder || "Ô văn bản";
-      const measured = Math.ceil(ctx.measureText(text).width + 10);
-      input.style.width = Math.max(58, Math.min(520, measured)) + "px";
+      const measured = Math.ceil(ctx.measureText(text.replace(/\n/g, " ")).width + 12);
+      const parent = input.parentElement;
+      const badge = parent?.querySelector(".answer-index");
+      const parentWidth = Math.max(120, parent?.clientWidth || 520);
+      const badgeWidth = badge ? badge.offsetWidth + 9 : 0;
+      const availableWidth = Math.max(92, Math.min(520, parentWidth - badgeWidth - 4));
+      const targetWidth = Math.max(58, Math.min(availableWidth, measured));
+
+      input.style.width = `${targetWidth}px`;
+      input.style.height = "auto";
+      input.style.height = `${Math.max(34, input.scrollHeight)}px`;
     }
 
     async function localCompressImageFile(file, maxSide = 1400, quality = 0.80) {
@@ -1297,16 +1307,27 @@
         indexBadge.className = "answer-index";
         indexBadge.textContent = String(index + 1);
 
-        const nameInput = document.createElement("input");
-        nameInput.type = "text";
+        const nameInput = document.createElement("textarea");
+        nameInput.rows = 1;
         nameInput.className = "answer-name-input";
         nameInput.value = answerLabel(item, index, q);
         nameInput.setAttribute("aria-label", `Tên ô trả lời ${index + 1}`);
+        nameInput.setAttribute("wrap", "soft");
         nameInput.addEventListener("input", () => {
+          // Giữ tên là một chuỗi logic; việc xuống dòng chỉ do giao diện tự wrap.
+          if (nameInput.value.includes("\n")) {
+            nameInput.value = nameInput.value.replace(/\r?\n+/g, " ");
+          }
           item.customLabel = nameInput.value;
           fitNameInput(nameInput);
           rich.dataset.placeholder = `Viết ${answerLabel(item, index, q).toLocaleLowerCase("vi")} tại đây…`;
           scheduleAutoSave();
+        });
+        nameInput.addEventListener("keydown", event => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            nameInput.blur();
+          }
         });
 
         num.append(indexBadge, nameInput);
@@ -1400,6 +1421,14 @@
         fitNameInput(nameInput);
       });
     }
+
+    let nameFitResizeTimer = null;
+    window.addEventListener("resize", () => {
+      clearTimeout(nameFitResizeTimer);
+      nameFitResizeTimer = setTimeout(() => {
+        els.answers.querySelectorAll(".answer-name-input").forEach(fitNameInput);
+      }, 100);
+    });
 
     function addAnswer() {
       if (!questions.length) return;

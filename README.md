@@ -1,3 +1,7 @@
+# Posttool 1.3.6
+
+Bổ sung hiển thị Textbox name tự xuống dòng khi tên dài; tên ngắn vẫn ở một dòng.
+
 # Posttool 1.3.4 - Vercel Safe
 
 ## Cập nhật 1.3.5 – Popup kết quả & lưu số lần nộp

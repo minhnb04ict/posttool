@@ -1,8 +1,8 @@
 {
   "name": "posttool",
-  "version": "1.3.5",
+  "version": "1.3.6",
   "private": true,
-  "description": "Phiếu trả lời - Express + EJS + persistent submission result popup + classroom optimized client report rendering",
+  "description": "Phiếu trả lời - Express + EJS + submission popup + responsive multiline textbox names + classroom optimized client report rendering",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
